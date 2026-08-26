@@ -638,6 +638,8 @@
             const who = m.fromId === myDeviceId ? 'me' : 'them';
             if (m.msgType === 'voice') {
               addVoiceBubble(m.audioData, m.duration, who, m.createdAt, m._id || m.id);
+            } else if (m.msgType === 'gif') {
+              addGifBubble(m.gifData, who, m.createdAt, m._id || m.id);
             } else {
               addThreadBubble(m.text, who, m.createdAt, m._id || m.id);
             }
@@ -656,6 +658,8 @@
           hideThreadTyping();
           if (msg.msgType === 'voice') {
             addVoiceBubble(msg.audioData, msg.duration, who, msg.createdAt, msg.id);
+          } else if (msg.msgType === 'gif') {
+            addGifBubble(msg.gifData, who, msg.createdAt, msg.id);
           } else {
             addThreadBubble(msg.text, who, msg.createdAt, msg.id);
           }
@@ -737,6 +741,35 @@
     const tickHtml = who === 'me' ? '<span class="wa-tick">✓</span>' : '';
     bubble.innerHTML = `<span class="wa-bubble__text">${linked}</span><span class="wa-bubble__time">${formatBubbleTime(timestamp || Date.now())}${tickHtml}</span>`;
 
+    row.appendChild(bubble);
+    threadLog.appendChild(row);
+    threadLog.scrollTop = threadLog.scrollHeight;
+  }
+
+  // GIF bubble: displays the animated GIF inside a compact WhatsApp-style bubble.
+  function addGifBubble(gifData, who, timestamp, msgId) {
+    if (!/^data:image\/gif;base64,/i.test(String(gifData || ''))) return;
+
+    const row = document.createElement('div');
+    row.className = `wa-bubble-row wa-bubble-row--${who === 'me' ? 'me' : 'them'}`;
+
+    const bubble = document.createElement('div');
+    bubble.className = `wa-bubble wa-bubble--${who === 'me' ? 'me' : 'them'} wa-gif-bubble`;
+    if (msgId) bubble.dataset.msgId = msgId;
+
+    const img = document.createElement('img');
+    img.className = 'wa-gif-image';
+    img.src = gifData;
+    img.alt = 'GIF';
+    img.loading = 'lazy';
+    img.decoding = 'async';
+
+    const meta = document.createElement('span');
+    meta.className = 'wa-bubble__time wa-gif-time';
+    meta.innerHTML = `${formatBubbleTime(timestamp || Date.now())}${who === 'me' ? '<span class="wa-tick">✓</span>' : ''}`;
+
+    bubble.appendChild(img);
+    bubble.appendChild(meta);
     row.appendChild(bubble);
     threadLog.appendChild(row);
     threadLog.scrollTop = threadLog.scrollHeight;
@@ -1193,12 +1226,82 @@
   });
 
   let threadTypingSendTimeout = null;
-  threadInput.addEventListener('input', () => {
+  threadInput.addEventListener('input', async () => {
+    // Android keyboards that support rich-content insertion may place the GIF
+    // directly into a contenteditable field. Detect it and send immediately.
+    const gif = threadInput.querySelector('img');
+    if (gif && gif.src) {
+      await sendGifFromSource(gif.src);
+      threadInput.innerHTML = '';
+      return;
+    }
+
     if (!currentThreadContactId) return;
     if (threadTypingSendTimeout) return; // throttle to once per ~1.2s
     sendWs('inbox_typing', { toDeviceId: currentThreadContactId });
     threadTypingSendTimeout = setTimeout(() => { threadTypingSendTimeout = null; }, 1200);
   });
+
+  // Gboard/other mobile keyboards can expose GIFs as clipboard image data.
+  threadInput.addEventListener('paste', async (event) => {
+    const items = Array.from(event.clipboardData?.items || []);
+    const gifItem = items.find((item) => item.type === 'image/gif');
+    if (gifItem) {
+      event.preventDefault();
+      const file = gifItem.getAsFile();
+      if (file) await sendGifFile(file);
+      return;
+    }
+
+    // Some keyboards expose an HTML <img> instead of a File.
+    const html = event.clipboardData?.getData('text/html') || '';
+    const match = html.match(/<img[^>]+src=[\"']([^\"']+)[\"']/i);
+    if (match && /\.gif(?:[?#]|$)/i.test(match[1])) {
+      event.preventDefault();
+      await sendGifFromSource(match[1]);
+    }
+  });
+
+  threadInput.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' && !event.shiftKey) {
+      event.preventDefault();
+      threadForm.requestSubmit();
+    }
+  });
+
+  async function sendGifFile(file) {
+    if (!currentThreadContactId || !file || file.type !== 'image/gif') return;
+    if (file.size > 3 * 1024 * 1024) {
+      addSystemBubble('GIF is too large (max 3 MB).');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => sendWs('send_inbox_gif', {
+      toDeviceId: currentThreadContactId,
+      gifData: reader.result,
+    });
+    reader.readAsDataURL(file);
+  }
+
+  async function sendGifFromSource(source) {
+    if (!currentThreadContactId || !source) return;
+    if (!/^data:image\/gif;base64,/i.test(source)) {
+      try {
+        const response = await fetch(source, { mode: 'cors' });
+        if (!response.ok) return;
+        const file = await response.blob();
+        if (file.type === 'image/gif') await sendGifFile(file);
+      } catch {
+        // The browser may block cross-origin clipboard image URLs; ignore safely.
+      }
+      return;
+    }
+    if (source.length > 4 * 1024 * 1024) {
+      addSystemBubble('GIF is too large (max 3 MB).');
+      return;
+    }
+    sendWs('send_inbox_gif', { toDeviceId: currentThreadContactId, gifData: source });
+  }
 
   callBtn.addEventListener('click', startCall);
   callAcceptBtn.addEventListener('click', acceptIncomingCall);
@@ -1207,10 +1310,10 @@
 
   threadForm.addEventListener('submit', (e) => {
     e.preventDefault();
-    const text = threadInput.value.trim();
+    const text = threadInput.textContent.trim();
     if (!text || !currentThreadContactId) return;
     sendWs('send_inbox_message', { toDeviceId: currentThreadContactId, text });
-    threadInput.value = '';
+    threadInput.innerHTML = '';
   });
 
   // ---------- Voice note recording ----------

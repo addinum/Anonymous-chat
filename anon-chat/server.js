@@ -415,6 +415,38 @@ wss.on('connection', (ws) => {
         break;
       }
 
+      case 'send_inbox_gif': {
+        const myId = wsDeviceId.get(ws);
+        const toId = String(msg.toDeviceId || '');
+        const gifData = String(msg.gifData || '');
+        const MAX_GIF_DATA_LENGTH = 4 * 1024 * 1024;
+
+        // Only accept GIF data URLs from the chat input. This keeps the
+        // feature self-contained and avoids storing arbitrary URLs/HTML.
+        if (!myId || !toId || !gifData || myId === toId) break;
+        if (!/^data:image\/gif;base64,[A-Za-z0-9+/=]+$/i.test(gifData)) break;
+        if (gifData.length > MAX_GIF_DATA_LENGTH) {
+          send(ws, 'gif_rejected', { reason: 'GIF is too large (max 4 MB).' });
+          break;
+        }
+        if (!(await db.areContacts(myId, toId))) break;
+
+        db.saveGifMessage(myId, toId, gifData).then((saved) => {
+          const payload = {
+            id: saved && saved._id ? String(saved._id) : `local-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+            msgType: 'gif',
+            fromId: myId,
+            toId,
+            gifData,
+            createdAt: saved ? saved.createdAt : new Date(),
+          };
+          send(ws, 'inbox_message', payload);
+          const recipientWs = deviceOnline.get(toId);
+          if (recipientWs) send(recipientWs, 'inbox_message', payload);
+        });
+        break;
+      }
+
       case 'send_inbox_voice': {
         const myId = wsDeviceId.get(ws);
         const toId = String(msg.toDeviceId || '');

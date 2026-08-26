@@ -1224,6 +1224,27 @@ h1 {
   box-shadow: 0 4px 16px rgba(255,46,147,0.35);
 }
 
+/* ---------- GIF bubble ---------- */
+.wa-gif-bubble {
+  padding: 4px 4px 3px;
+  max-width: min(78vw, 300px);
+  overflow: hidden;
+}
+.wa-gif-image {
+  display: block;
+  width: auto;
+  max-width: min(70vw, 280px);
+  max-height: 260px;
+  border-radius: 12px;
+  object-fit: contain;
+  background: rgba(0,0,0,0.18);
+}
+.wa-gif-time {
+  display: block;
+  padding: 3px 4px 0;
+  text-align: right;
+}
+
 /* ---------- Voice note bubble (playback) ---------- */
 .wa-voice-bubble {
   display: flex;
