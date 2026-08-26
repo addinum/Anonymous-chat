@@ -617,6 +617,20 @@
         updateInboxBadge();
         break;
 
+      case 'contact_deleted':
+        if (msg.ok) {
+          latestContacts = latestContacts.filter((c) => c.contactId !== msg.contactId);
+          if (currentThreadContactId === msg.contactId) {
+            currentThreadContactId = null;
+            showScreen('inbox');
+          }
+          renderInboxList();
+          updateInboxBadge();
+        } else {
+          alert('Could not delete this contact. Please try again.');
+        }
+        break;
+
       case 'thread_history':
         if (msg.contactId === currentThreadContactId) {
           threadLog.innerHTML = '';
@@ -886,12 +900,21 @@
           </div>
           <div class="inbox-row__bottom">
             <span class="inbox-row__preview">${c.lastMessage ? escapeHtml(c.lastMessage) : 'Say hi…'}</span>
-            ${unread ? `<span class="inbox-row__badge">${c.unreadCount > 99 ? '99+' : c.unreadCount}</span>` : ''}
+            <div class="inbox-row__actions">
+              ${unread ? `<span class="inbox-row__badge">${c.unreadCount > 99 ? '99+' : c.unreadCount}</span>` : ''}
+              <button type="button" class="inbox-row__delete" aria-label="Delete contact" title="Delete contact">🗑</button>
+            </div>
           </div>
         </div>
       `;
       renderAvatarInto(row.querySelector('.inbox-row__avatar'), c.avatar);
       row.addEventListener('click', () => openThread(c.contactId, c.name, c.avatar));
+      row.querySelector('.inbox-row__delete').addEventListener('click', (event) => {
+        event.stopPropagation();
+        if (window.confirm(`Delete ${c.name || 'this contact'} from your Inbox?`)) {
+          sendWs('delete_contact', { contactId: c.contactId });
+        }
+      });
       inboxList.appendChild(row);
     });
   }

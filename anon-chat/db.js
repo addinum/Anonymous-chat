@@ -175,6 +175,17 @@ async function saveContactPair(idA, nameA, avatarA, idB, nameB, avatarB) {
   }
 }
 
+async function deleteContact(ownerId, contactId) {
+  if (!isReady() || !ownerId || !contactId) return false;
+  try {
+    const result = await Contact.deleteOne({ ownerId, contactId });
+    return result.deletedCount > 0;
+  } catch (err) {
+    console.error('deleteContact failed:', err.message);
+    return false;
+  }
+}
+
 async function getContacts(ownerId) {
   if (!isReady()) return [];
   try {
@@ -267,6 +278,7 @@ module.exports = {
   updateAccount,
   saveContactPair,
   getContacts,
+  deleteContact,
   saveMessage,
   saveVoiceMessage,
   getThread,

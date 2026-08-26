@@ -313,6 +313,16 @@ wss.on('connection', (ws) => {
         break;
       }
 
+      case 'delete_contact': {
+        const myId = wsDeviceId.get(ws);
+        const contactId = String(msg.contactId || '');
+        if (!myId || !contactId || myId === contactId) break;
+
+        const deleted = await db.deleteContact(myId, contactId);
+        send(ws, 'contact_deleted', { contactId, ok: deleted });
+        break;
+      }
+
       case 'open_thread': {
         const myId = wsDeviceId.get(ws);
         const theirId = String(msg.contactId || '');

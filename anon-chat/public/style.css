@@ -933,6 +933,37 @@ h1 {
   flex: 1;
 }
 
+.inbox-row__actions {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-shrink: 0;
+}
+
+.inbox-row__delete {
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: rgba(255,255,255,0.04);
+  color: var(--text-faint);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  font-size: 14px;
+  padding: 0;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+
+.inbox-row__delete:hover,
+.inbox-row__delete:focus-visible {
+  color: #fff;
+  background: rgba(255, 80, 110, 0.14);
+  border-color: rgba(255, 80, 110, 0.4);
+  outline: none;
+}
+
 .inbox-row__badge {
   background: linear-gradient(135deg, var(--accent), var(--accent-deep));
   color: #fff;
