@@ -1,0 +1,274 @@
+// db.js — MongoDB persistence layer for the inbox feature.
+// Designed to fail gracefully: if MONGODB_URI isn't set or the connection
+// isn't ready, every function here becomes a safe no-op instead of crashing
+// the server. This means anonymous live chat keeps working even without a
+// database configured.
+
+const mongoose = require('mongoose');
+const bcrypt = require('bcryptjs');
+
+const accountSchema = new mongoose.Schema({
+  email: { type: String, required: true, unique: true, lowercase: true, trim: true },
+  passwordHash: { type: String, required: true },
+  deviceId: { type: String, required: true }, // the canonical deviceId this account "owns"
+  createdAt: { type: Date, default: Date.now },
+});
+
+const contactSchema = new mongoose.Schema({
+  ownerId: { type: String, required: true, index: true },
+  contactId: { type: String, required: true },
+  contactName: { type: String, default: 'Stranger' },
+  contactAvatar: { type: String, default: 'boy1' },
+  createdAt: { type: Date, default: Date.now },
+});
+contactSchema.index({ ownerId: 1, contactId: 1 }, { unique: true });
+
+const messageSchema = new mongoose.Schema({
+  fromId: { type: String, required: true, index: true },
+  toId: { type: String, required: true, index: true },
+  msgType: { type: String, enum: ['text', 'voice'], default: 'text' },
+  text: { type: String, default: '' },
+  audioData: { type: String, default: null }, // base64-encoded audio, voice notes only
+  duration: { type: Number, default: null },  // seconds, voice notes only
+  createdAt: { type: Date, default: Date.now },
+  read: { type: Boolean, default: false },
+});
+
+const Account = mongoose.model('Account', accountSchema);
+const Contact = mongoose.model('Contact', contactSchema);
+const Message = mongoose.model('Message', messageSchema);
+
+function isReady() {
+  return mongoose.connection.readyState === 1; // 1 = connected
+}
+
+async function connect() {
+  const uri = process.env.MONGODB_URI;
+  if (!uri) {
+    console.log('MONGODB_URI not set — inbox/contacts feature disabled, anonymous chat still works.');
+    return;
+  }
+  try {
+    await mongoose.connect(uri);
+    console.log('Connected to MongoDB — inbox feature enabled.');
+  } catch (err) {
+    console.error('MongoDB connection failed — inbox feature disabled. Reason:', err.message);
+  }
+}
+
+// ---- Accounts (optional email login on top of the anonymous deviceId system) ----
+// Signing up links the CURRENT deviceId to the account, so existing
+// contacts/inbox (already keyed by deviceId) show up automatically —
+// no data migration needed. Logging in elsewhere just hands back that
+// same deviceId so the client can switch to it.
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+async function createAccount(email, password, deviceId) {
+  if (!isReady()) return { ok: false, error: 'Account storage is not available right now.' };
+  const cleanEmail = String(email || '').trim().toLowerCase();
+  if (!EMAIL_RE.test(cleanEmail)) return { ok: false, error: 'Enter a valid email address.' };
+  if (!password || password.length < 6) return { ok: false, error: 'Password must be at least 6 characters.' };
+  if (!deviceId) return { ok: false, error: 'Missing device — try refreshing the page.' };
+
+  try {
+    const existing = await Account.findOne({ email: cleanEmail }).lean();
+    if (existing) return { ok: false, error: 'An account with that email already exists.' };
+
+    const passwordHash = await bcrypt.hash(password, 10);
+    await Account.create({ email: cleanEmail, passwordHash, deviceId });
+    return { ok: true, email: cleanEmail, deviceId };
+  } catch (err) {
+    console.error('createAccount failed:', err.message);
+    return { ok: false, error: 'Something went wrong creating your account.' };
+  }
+}
+
+async function verifyLogin(email, password) {
+  if (!isReady()) return { ok: false, error: 'Account storage is not available right now.' };
+  const cleanEmail = String(email || '').trim().toLowerCase();
+
+  try {
+    const account = await Account.findOne({ email: cleanEmail });
+    if (!account) return { ok: false, error: 'No account found with that email.' };
+
+    const matches = await bcrypt.compare(password || '', account.passwordHash);
+    if (!matches) return { ok: false, error: 'Incorrect password.' };
+
+    return { ok: true, email: account.email, deviceId: account.deviceId };
+  } catch (err) {
+    console.error('verifyLogin failed:', err.message);
+    return { ok: false, error: 'Something went wrong logging in.' };
+  }
+}
+
+async function getAccountByDeviceId(deviceId) {
+  if (!isReady() || !deviceId) return null;
+  try {
+    const account = await Account.findOne({ deviceId }).lean();
+    return account ? { email: account.email } : null;
+  } catch (err) {
+    console.error('getAccountByDeviceId failed:', err.message);
+    return null;
+  }
+}
+
+async function updateAccount(deviceId, currentPassword, newEmail, newPassword) {
+  if (!isReady()) return { ok: false, error: 'Account storage is not available right now.' };
+  try {
+    const account = await Account.findOne({ deviceId });
+    if (!account) return { ok: false, error: 'No account linked to this device.' };
+
+    const matches = await bcrypt.compare(currentPassword || '', account.passwordHash);
+    if (!matches) return { ok: false, error: 'Current password is incorrect.' };
+
+    if (newEmail) {
+      const cleanEmail = String(newEmail).trim().toLowerCase();
+      if (!EMAIL_RE.test(cleanEmail)) return { ok: false, error: 'Enter a valid new email address.' };
+      const taken = await Account.findOne({ email: cleanEmail, deviceId: { $ne: deviceId } }).lean();
+      if (taken) return { ok: false, error: 'That email is already in use.' };
+      account.email = cleanEmail;
+    }
+
+    if (newPassword) {
+      if (newPassword.length < 6) return { ok: false, error: 'New password must be at least 6 characters.' };
+      account.passwordHash = await bcrypt.hash(newPassword, 10);
+    }
+
+    await account.save();
+    return { ok: true, email: account.email };
+  } catch (err) {
+    console.error('updateAccount failed:', err.message);
+    return { ok: false, error: 'Something went wrong updating your account.' };
+  }
+}
+
+
+async function areContacts(idA, idB) {
+  if (!isReady() || !idA || !idB) return false;
+  try {
+    const pair = await Contact.exists({ ownerId: idA, contactId: idB });
+    return !!pair;
+  } catch (err) {
+    console.error('areContacts failed:', err.message);
+    return false;
+  }
+}
+
+// ---- Contacts ----
+async function saveContactPair(idA, nameA, avatarA, idB, nameB, avatarB) {
+  if (!isReady()) return false;
+  try {
+    await Contact.updateOne(
+      { ownerId: idA, contactId: idB },
+      { $set: { contactName: nameB, contactAvatar: avatarB || 'boy1' } },
+      { upsert: true }
+    );
+    await Contact.updateOne(
+      { ownerId: idB, contactId: idA },
+      { $set: { contactName: nameA, contactAvatar: avatarA || 'boy1' } },
+      { upsert: true }
+    );
+    return true;
+  } catch (err) {
+    console.error('saveContactPair failed:', err.message);
+    return false;
+  }
+}
+
+async function getContacts(ownerId) {
+  if (!isReady()) return [];
+  try {
+    const contacts = await Contact.find({ ownerId }).lean();
+    const results = [];
+    for (const c of contacts) {
+      const unreadCount = await Message.countDocuments({
+        fromId: c.contactId,
+        toId: ownerId,
+        read: false,
+      });
+      const lastMsg = await Message.findOne({
+        $or: [
+          { fromId: ownerId, toId: c.contactId },
+          { fromId: c.contactId, toId: ownerId },
+        ],
+      }).sort({ createdAt: -1 }).lean();
+      results.push({
+        contactId: c.contactId,
+        name: c.contactName,
+        avatar: c.contactAvatar || 'boy1',
+        unreadCount,
+        lastMessage: lastMsg ? (lastMsg.msgType === 'voice' ? '🎤 Voice message' : lastMsg.text) : null,
+        lastAt: lastMsg ? lastMsg.createdAt : c.createdAt,
+      });
+    }
+    results.sort((a, b) => new Date(b.lastAt) - new Date(a.lastAt));
+    return results;
+  } catch (err) {
+    console.error('getContacts failed:', err.message);
+    return [];
+  }
+}
+
+// ---- Messages ----
+async function saveMessage(fromId, toId, text) {
+  if (!isReady()) return null;
+  try {
+    const msg = await Message.create({ fromId, toId, msgType: 'text', text });
+    return msg;
+  } catch (err) {
+    console.error('saveMessage failed:', err.message);
+    return null;
+  }
+}
+
+async function saveVoiceMessage(fromId, toId, audioData, duration) {
+  if (!isReady()) return null;
+  try {
+    const msg = await Message.create({ fromId, toId, msgType: 'voice', audioData, duration });
+    return msg;
+  } catch (err) {
+    console.error('saveVoiceMessage failed:', err.message);
+    return null;
+  }
+}
+
+async function getThread(userA, userB) {
+  if (!isReady()) return [];
+  try {
+    const messages = await Message.find({
+      $or: [
+        { fromId: userA, toId: userB },
+        { fromId: userB, toId: userA },
+      ],
+    }).sort({ createdAt: 1 }).lean();
+    return messages;
+  } catch (err) {
+    console.error('getThread failed:', err.message);
+    return [];
+  }
+}
+
+async function markThreadRead(fromId, toId) {
+  if (!isReady()) return;
+  try {
+    await Message.updateMany({ fromId, toId, read: false }, { $set: { read: true } });
+  } catch (err) {
+    console.error('markThreadRead failed:', err.message);
+  }
+}
+
+module.exports = {
+  areContacts,
+  connect,
+  isReady,
+  createAccount,
+  verifyLogin,
+  getAccountByDeviceId,
+  updateAccount,
+  saveContactPair,
+  getContacts,
+  saveMessage,
+  saveVoiceMessage,
+  getThread,
+  markThreadRead,
+};
