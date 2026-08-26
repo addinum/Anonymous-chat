@@ -75,6 +75,13 @@
   const threadForm = document.getElementById('threadForm');
   const threadInput = document.getElementById('threadInput');
   const micBtn = document.getElementById('micBtn');
+  const gifBtn = document.getElementById('gifBtn');
+  const gifPickerModal = document.getElementById('gifPickerModal');
+  const gifPickerClose = document.getElementById('gifPickerClose');
+  const gifSearchForm = document.getElementById('gifSearchForm');
+  const gifSearchInput = document.getElementById('gifSearchInput');
+  const gifPickerStatus = document.getElementById('gifPickerStatus');
+  const gifResults = document.getElementById('gifResults');
   const recordBar = document.getElementById('recordBar');
   const recordTime = document.getElementById('recordTime');
   const recordCancelBtn = document.getElementById('recordCancelBtn');
@@ -114,6 +121,11 @@
 
   // ---------- Persistent device identity (for the inbox feature only) ----------
   const DEVICE_ID_KEY = 'wavelength_device_id';
+
+  // Add your GIPHY Web API key here. GIPHY requires an API key for search.
+  // Keep the key in the frontend config because GIPHY's Search endpoint is a client-side API.
+  const GIPHY_API_KEY = window.GIPHY_API_KEY || '';
+  const GIPHY_SEARCH_URL = 'https://api.giphy.com/v1/gifs/search';
 
   function getDeviceId() {
     let id = localStorage.getItem(DEVICE_ID_KEY);
@@ -748,7 +760,10 @@
 
   // GIF bubble: displays the animated GIF inside a compact WhatsApp-style bubble.
   function addGifBubble(gifData, who, timestamp, msgId) {
-    if (!/^data:image\/gif;base64,/i.test(String(gifData || ''))) return;
+    const source = String(gifData || '');
+    const isDataGif = /^data:image\/gif;base64,/i.test(source);
+    const isRemoteGif = /^https:\/\/(?:media\.)?giphy\.com\//i.test(source) || /^https:\/\/i\.giphy\.com\//i.test(source);
+    if (!isDataGif && !isRemoteGif) return;
 
     const row = document.createElement('div');
     row.className = `wa-bubble-row wa-bubble-row--${who === 'me' ? 'me' : 'them'}`;
@@ -759,7 +774,7 @@
 
     const img = document.createElement('img');
     img.className = 'wa-gif-image';
-    img.src = gifData;
+    img.src = source;
     img.alt = 'GIF';
     img.loading = 'lazy';
     img.decoding = 'async';
@@ -1302,6 +1317,86 @@
     }
     sendWs('send_inbox_gif', { toDeviceId: currentThreadContactId, gifData: source });
   }
+
+  // ---------- GIPHY GIF picker ----------
+  function openGifPicker() {
+    if (!currentThreadContactId) return;
+    gifPickerModal.classList.remove('hidden');
+    gifSearchInput.value = '';
+    gifResults.innerHTML = '';
+    gifPickerStatus.textContent = GIPHY_API_KEY ? 'Search for a GIF' : 'Add your GIPHY API key in script.js first.';
+    setTimeout(() => gifSearchInput.focus(), 50);
+  }
+
+  function closeGifPicker() {
+    gifPickerModal.classList.add('hidden');
+  }
+
+  async function searchGifs(query) {
+    const q = String(query || '').trim().slice(0, 50);
+    if (!q) return;
+    if (!GIPHY_API_KEY) {
+      gifPickerStatus.textContent = 'GIPHY API key is not configured.';
+      return;
+    }
+
+    gifPickerStatus.textContent = 'Searching…';
+    gifResults.innerHTML = '';
+
+    try {
+      const params = new URLSearchParams({
+        api_key: GIPHY_API_KEY,
+        q,
+        limit: '24',
+        offset: '0',
+        rating: 'g',
+        lang: 'en',
+        bundle: 'messaging_non_clips'
+      });
+      const response = await fetch(`${GIPHY_SEARCH_URL}?${params.toString()}`);
+      if (!response.ok) throw new Error('GIF search failed');
+      const result = await response.json();
+      const gifs = Array.isArray(result.data) ? result.data : [];
+
+      if (!gifs.length) {
+        gifPickerStatus.textContent = 'No GIFs found.';
+        return;
+      }
+
+      gifPickerStatus.textContent = `${gifs.length} GIFs found`;
+      gifs.forEach((gif) => {
+        const preview = gif?.images?.fixed_width_small?.url || gif?.images?.preview_gif?.url;
+        const sendUrl = gif?.images?.fixed_width?.url || gif?.images?.original?.url;
+        if (!preview || !sendUrl) return;
+
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'gif-result';
+        button.title = 'Send GIF';
+        button.innerHTML = `<img src="${escapeHtml(preview)}" alt="GIF" loading="lazy" decoding="async">`;
+        button.addEventListener('click', () => sendSelectedGif(sendUrl));
+        gifResults.appendChild(button);
+      });
+    } catch (err) {
+      gifPickerStatus.textContent = 'Could not load GIFs. Check your API key and connection.';
+    }
+  }
+
+  function sendSelectedGif(url) {
+    if (!currentThreadContactId || !url) return;
+    sendWs('send_inbox_gif', { toDeviceId: currentThreadContactId, gifData: url });
+    closeGifPicker();
+  }
+
+  gifBtn.addEventListener('click', openGifPicker);
+  gifPickerClose.addEventListener('click', closeGifPicker);
+  gifPickerModal.addEventListener('click', (event) => {
+    if (event.target === gifPickerModal) closeGifPicker();
+  });
+  gifSearchForm.addEventListener('submit', (event) => {
+    event.preventDefault();
+    searchGifs(gifSearchInput.value);
+  });
 
   callBtn.addEventListener('click', startCall);
   callAcceptBtn.addEventListener('click', acceptIncomingCall);

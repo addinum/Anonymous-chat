@@ -421,10 +421,12 @@ wss.on('connection', (ws) => {
         const gifData = String(msg.gifData || '');
         const MAX_GIF_DATA_LENGTH = 4 * 1024 * 1024;
 
-        // Only accept GIF data URLs from the chat input. This keeps the
-        // feature self-contained and avoids storing arbitrary URLs/HTML.
+        // Accept either legacy uploaded GIF data URLs or trusted GIPHY HTTPS URLs.
+        // Remote URLs keep MongoDB tiny because the GIF bytes stay on GIPHY.
         if (!myId || !toId || !gifData || myId === toId) break;
-        if (!/^data:image\/gif;base64,[A-Za-z0-9+/=]+$/i.test(gifData)) break;
+        const isGifData = /^data:image\/gif;base64,[A-Za-z0-9+/=]+$/i.test(gifData);
+        const isGiphyUrl = /^https:\/\/(?:media\.)?giphy\.com\//i.test(gifData) || /^https:\/\/i\.giphy\.com\//i.test(gifData);
+        if (!isGifData && !isGiphyUrl) break;
         if (gifData.length > MAX_GIF_DATA_LENGTH) {
           send(ws, 'gif_rejected', { reason: 'GIF is too large (max 4 MB).' });
           break;

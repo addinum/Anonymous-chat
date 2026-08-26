@@ -1245,6 +1245,105 @@ h1 {
   text-align: right;
 }
 
+
+/* ---------- GIF picker ---------- */
+.wa-gif-btn {
+  flex-shrink: 0;
+  min-width: 42px;
+  height: 38px;
+  padding: 0 8px;
+  border-radius: 18px;
+  border: 1px solid var(--line);
+  background: var(--panel-raised);
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: .2px;
+  cursor: pointer;
+}
+.wa-gif-btn:active { transform: scale(.96); }
+.gif-picker-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 3000;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding: 14px;
+  background: rgba(0,0,0,.62);
+  backdrop-filter: blur(10px);
+}
+.gif-picker-card {
+  width: min(720px, 100%);
+  max-height: min(78vh, 680px);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 22px;
+  background: var(--panel);
+  box-shadow: 0 24px 70px rgba(0,0,0,.42);
+}
+.gif-picker-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 16px 10px;
+}
+.gif-picker-header strong { display: block; font-size: 16px; }
+.gif-powered { display: block; margin-top: 3px; color: var(--text-faint); font-size: 10px; }
+.gif-search-row {
+  display: flex;
+  gap: 8px;
+  padding: 0 16px 10px;
+}
+.gif-search-row input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel-raised);
+  color: var(--text);
+  padding: 11px 13px;
+  outline: none;
+  font-size: 15px;
+}
+.gif-picker-status {
+  min-height: 20px;
+  padding: 0 16px 8px;
+  color: var(--text-faint);
+  font-size: 12px;
+}
+.gif-results {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  padding: 0 10px 12px;
+  overflow-y: auto;
+}
+.gif-result {
+  aspect-ratio: 1.35;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  border-radius: 9px;
+  background: rgba(255,255,255,.06);
+  cursor: pointer;
+}
+.gif-result img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+}
+.gif-result:active { transform: scale(.98); }
+@media (max-width: 520px) {
+  .gif-results { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 5px; }
+  .gif-picker-overlay { padding: 8px; }
+  .gif-picker-card { max-height: 82vh; border-radius: 18px; }
+}
+
 /* ---------- Voice note bubble (playback) ---------- */
 .wa-voice-bubble {
   display: flex;
