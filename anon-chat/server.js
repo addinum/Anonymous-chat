@@ -425,7 +425,7 @@ wss.on('connection', (ws) => {
         // Remote URLs keep MongoDB tiny because the GIF bytes stay on GIPHY.
         if (!myId || !toId || !gifData || myId === toId) break;
         const isGifData = /^data:image\/gif;base64,[A-Za-z0-9+/=]+$/i.test(gifData);
-        const isGiphyUrl = /^https:\/\/(?:media\.)?giphy\.com\//i.test(gifData) || /^https:\/\/i\.giphy\.com\//i.test(gifData);
+        const isGiphyUrl = /^https:\/\/(?:[a-z0-9-]+\.)*giphy\.com\//i.test(gifData);
         if (!isGifData && !isGiphyUrl) break;
         if (gifData.length > MAX_GIF_DATA_LENGTH) {
           send(ws, 'gif_rejected', { reason: 'GIF is too large (max 4 MB).' });

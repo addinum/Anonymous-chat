@@ -124,7 +124,7 @@
 
   // Add your GIPHY Web API key here. GIPHY requires an API key for search.
   // Keep the key in the frontend config because GIPHY's Search endpoint is a client-side API.
-  const GIPHY_API_KEY ="wioUWI1QTpt01TUbKVbfl4b6C9KCwWqL";
+  const GIPHY_API_KEY = window.GIPHY_API_KEY || '';
   const GIPHY_SEARCH_URL = 'https://api.giphy.com/v1/gifs/search';
 
   function getDeviceId() {
@@ -762,7 +762,7 @@
   function addGifBubble(gifData, who, timestamp, msgId) {
     const source = String(gifData || '');
     const isDataGif = /^data:image\/gif;base64,/i.test(source);
-    const isRemoteGif = /^https:\/\/(?:media\.)?giphy\.com\//i.test(source) || /^https:\/\/i\.giphy\.com\//i.test(source);
+    const isRemoteGif = /^https:\/\/(?:[a-z0-9-]+\.)*giphy\.com\//i.test(source);
     if (!isDataGif && !isRemoteGif) return;
 
     const row = document.createElement('div');
