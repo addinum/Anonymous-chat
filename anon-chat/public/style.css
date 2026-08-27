@@ -1331,18 +1331,21 @@ h1 {
   color: var(--text-faint);
   font-size: 12px;
 }
-.gif-results {
+ .gif-results {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
-  align-items: start;
-  gap: 7px;
+  grid-auto-rows: 150px;
+  align-items: stretch;
+  gap: 8px;
   padding: 0 10px 14px;
   overflow-y: auto;
   overscroll-behavior: contain;
 }
 .gif-result {
   width: 100%;
+  height: 150px;
   min-width: 0;
+  min-height: 0;
   padding: 0;
   overflow: hidden;
   border: 1px solid rgba(255,255,255,.07);
@@ -1350,12 +1353,16 @@ h1 {
   background: rgba(255,255,255,.05);
   cursor: pointer;
   line-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
 }
 .gif-result img {
   width: 100%;
-  height: auto;
-  min-height: 80px;
-  max-height: 190px;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
   display: block;
   object-fit: contain;
   background: rgba(0,0,0,.14);
@@ -1364,8 +1371,12 @@ h1 {
 @media (max-width: 520px) {
   .gif-picker-overlay { padding: 8px; align-items: center; }
   .gif-picker-card { max-height: 88vh; border-radius: 18px; }
-  .gif-results { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
-  .gif-result img { max-height: 180px; }
+  .gif-results {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-auto-rows: 150px;
+    gap: 8px;
+  }
+  .gif-result { height: 150px; }
   .gif-search-row { padding-left: 12px; padding-right: 12px; }
   .gif-search-row .btn-primary { flex-basis: 70px; width: 70px; min-width: 70px; }
 }
