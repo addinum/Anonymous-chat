@@ -97,6 +97,11 @@
   const activeCallName = document.getElementById('activeCallName');
   const activeCallStatus = document.getElementById('activeCallStatus');
   const callHangupBtn = document.getElementById('callHangupBtn');
+  const callBarMain = document.getElementById('callBarMain');
+  const callBarControls = document.getElementById('callBarControls');
+  const callDuration = document.getElementById('callDuration');
+  const callSpeakerBtn = document.getElementById('callSpeakerBtn');
+  const callMuteBtn = document.getElementById('callMuteBtn');
   const remoteAudio = document.getElementById('remoteAudio');
 
   let ws = null;
@@ -117,6 +122,10 @@
   let activeCallContactName = 'Contact';
   let activeCallContactAvatar = 'boy1';
   let pendingIncomingCall = null;
+  let callStartedAt = null;
+  let callTimerInterval = null;
+  let isCallMuted = false;
+  let isSpeakerOn = true;
   const rtcConfig = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
 
   // ---------- Persistent device identity (for the inbox feature only) ----------
@@ -124,7 +133,7 @@
 
   // Add your GIPHY Web API key here. GIPHY requires an API key for search.
   // Keep the key in the frontend config because GIPHY's Search endpoint is a client-side API.
-  const GIPHY_API_KEY ="wioUWI1QTpt01TUbKVbfl4b6C9KCwWqL";
+  const GIPHY_API_KEY = window.GIPHY_API_KEY || '';
   const GIPHY_SEARCH_URL = 'https://api.giphy.com/v1/gifs/search';
 
   function getDeviceId() {
@@ -971,16 +980,78 @@
     renderAvatarInto(el, avatarId || 'boy1');
   }
 
+  function formatCallDuration(ms) {
+    const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = String(totalSeconds % 60).padStart(2, '0');
+    return `${minutes}:${seconds}`;
+  }
+
+  function startCallTimer() {
+    if (!callStartedAt) callStartedAt = Date.now();
+    clearInterval(callTimerInterval);
+    callDuration.textContent = '0:00';
+    callTimerInterval = setInterval(() => {
+      if (callStartedAt) callDuration.textContent = formatCallDuration(Date.now() - callStartedAt);
+    }, 1000);
+  }
+
+  function stopCallTimer() {
+    clearInterval(callTimerInterval);
+    callTimerInterval = null;
+    callStartedAt = null;
+    callDuration.textContent = '0:00';
+  }
+
   function showActiveCall(name, avatar, status) {
     activeCallName.textContent = name || 'Contact';
     activeCallStatus.textContent = status || 'Calling…';
     setCallAvatar(activeCallAvatar, avatar);
     activeCallBar.classList.remove('hidden');
+    activeCallBar.classList.remove('expanded');
+    callBarMain.setAttribute('aria-expanded', 'false');
+    callDuration.textContent = '0:00';
+    callMuteBtn.setAttribute('aria-pressed', String(isCallMuted));
+    callSpeakerBtn.setAttribute('aria-pressed', String(isSpeakerOn));
   }
 
   function hideCallUI() {
     incomingCallModal.classList.add('hidden');
     activeCallBar.classList.add('hidden');
+    activeCallBar.classList.remove('expanded');
+    callBarMain.setAttribute('aria-expanded', 'false');
+    stopCallTimer();
+  }
+
+  function setCallConnected() {
+    activeCallStatus.textContent = 'Connected';
+    startCallTimer();
+  }
+
+  async function toggleSpeaker() {
+    isSpeakerOn = !isSpeakerOn;
+    callSpeakerBtn.setAttribute('aria-pressed', String(isSpeakerOn));
+    try {
+      // Browsers that expose setSinkId may allow choosing an output device.
+      // Mobile Chrome generally does not expose the phone receiver/earpiece.
+      if (typeof remoteAudio.setSinkId === 'function') {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const outputs = devices.filter(d => d.kind === 'audiooutput');
+        const preferred = isSpeakerOn
+          ? (outputs.find(d => /speaker|default/i.test(d.label)) || outputs[0])
+          : (outputs.find(d => /earpiece|receiver|communications/i.test(d.label)) || null);
+        if (preferred) await remoteAudio.setSinkId(preferred.deviceId);
+      }
+    } catch (err) {
+      console.warn('Audio output switching is not supported by this browser:', err);
+    }
+  }
+
+  function toggleCallMute() {
+    isCallMuted = !isCallMuted;
+    if (localCallStream) localCallStream.getAudioTracks().forEach(track => { track.enabled = !isCallMuted; });
+    callMuteBtn.setAttribute('aria-pressed', String(isCallMuted));
+    callMuteBtn.querySelector('span').textContent = isCallMuted ? 'Unmute' : 'Mute';
   }
 
   function sendCallSignal(toDeviceId, signalType, data) {
@@ -1000,7 +1071,7 @@
     };
     peerConnection.onconnectionstatechange = () => {
       if (!peerConnection) return;
-      if (['connected'].includes(peerConnection.connectionState)) activeCallStatus.textContent = 'Connected';
+      if (['connected'].includes(peerConnection.connectionState)) setCallConnected();
       if (['failed', 'disconnected', 'closed'].includes(peerConnection.connectionState)) endCall(false);
     };
 
@@ -1027,6 +1098,8 @@
       activeCallContactId = currentThreadContactId;
       activeCallContactName = threadWithLabel.textContent || 'Contact';
       activeCallContactAvatar = latestContacts.find(c => c.contactId === activeCallContactId)?.avatar || 'boy1';
+      isCallMuted = false;
+      isSpeakerOn = true;
       showActiveCall(activeCallContactName, activeCallContactAvatar, 'Calling…');
       await createPeerConnection(activeCallContactId, false);
       sendWs('call_invite', {
@@ -1049,6 +1122,8 @@
     activeCallContactId = call.fromId;
     activeCallContactName = call.fromName || 'Contact';
     activeCallContactAvatar = call.fromAvatar || 'boy1';
+    isCallMuted = false;
+    isSpeakerOn = true;
     showActiveCall(activeCallContactName, activeCallContactAvatar, 'Connecting…');
     try {
       await createPeerConnection(call.fromId, false);
@@ -1401,7 +1476,14 @@
   callBtn.addEventListener('click', startCall);
   callAcceptBtn.addEventListener('click', acceptIncomingCall);
   callDeclineBtn.addEventListener('click', declineIncomingCall);
-  callHangupBtn.addEventListener('click', () => endCall(true));
+  callHangupBtn.addEventListener('click', (event) => { event.stopPropagation(); endCall(true); });
+  callBarMain.addEventListener('click', () => {
+    const expanded = activeCallBar.classList.toggle('expanded');
+    callBarMain.setAttribute('aria-expanded', String(expanded));
+  });
+  callBarControls.addEventListener('click', (event) => event.stopPropagation());
+  callMuteBtn.addEventListener('click', toggleCallMute);
+  callSpeakerBtn.addEventListener('click', toggleSpeaker);
 
   threadForm.addEventListener('submit', (e) => {
     e.preventDefault();
