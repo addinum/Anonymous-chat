@@ -1012,7 +1012,7 @@
     callBarMain.setAttribute('aria-expanded', 'false');
     callDuration.textContent = '0:00';
     callMuteBtn.setAttribute('aria-pressed', String(isCallMuted));
-    callSpeakerBtn.setAttribute('aria-pressed', String(isSpeakerOn));
+    updateSpeakerButton();
   }
 
   function hideCallUI() {
@@ -1028,23 +1028,81 @@
     startCallTimer();
   }
 
-  async function toggleSpeaker() {
-    isSpeakerOn = !isSpeakerOn;
+  const isMobileCallDevice = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+
+  function updateSpeakerButton() {
     callSpeakerBtn.setAttribute('aria-pressed', String(isSpeakerOn));
-    try {
-      // Browsers that expose setSinkId may allow choosing an output device.
-      // Mobile Chrome generally does not expose the phone receiver/earpiece.
-      if (typeof remoteAudio.setSinkId === 'function') {
-        const devices = await navigator.mediaDevices.enumerateDevices();
-        const outputs = devices.filter(d => d.kind === 'audiooutput');
-        const preferred = isSpeakerOn
-          ? (outputs.find(d => /speaker|default/i.test(d.label)) || outputs[0])
-          : (outputs.find(d => /earpiece|receiver|communications/i.test(d.label)) || null);
-        if (preferred) await remoteAudio.setSinkId(preferred.deviceId);
-      }
-    } catch (err) {
-      console.warn('Audio output switching is not supported by this browser:', err);
+    const label = callSpeakerBtn.querySelector('span');
+    if (label) label.textContent = isSpeakerOn ? 'Speaker' : 'Receiver';
+    callSpeakerBtn.title = isSpeakerOn
+      ? 'Speaker on — tap for phone receiver'
+      : 'Phone receiver — tap for speaker';
+  }
+
+  async function applyAudioRoute(speakerOn) {
+    // Native Android wrapper hook. If the site is later packaged as an Android
+    // WebView, expose Android.setSpeakerphoneOn(boolean) and this becomes a
+    // real speaker/receiver switch. Normal mobile browsers do not expose this
+    // Android AudioManager control to JavaScript.
+    if (window.Android && typeof window.Android.setSpeakerphoneOn === 'function') {
+      window.Android.setSpeakerphoneOn(!!speakerOn);
+      return true;
     }
+
+    // Browser-standard output routing where supported. Most Android Chrome
+    // versions expose only the default output and cannot address the receiver.
+    if (typeof remoteAudio.setSinkId === 'function') {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const outputs = devices.filter(d => d.kind === 'audiooutput');
+      const preferred = speakerOn
+        ? (outputs.find(d => /speaker/i.test(d.label)) || outputs.find(d => d.deviceId === 'default') || outputs[0])
+        : outputs.find(d => /earpiece|receiver|communications|telephony/i.test(d.label));
+      if (preferred) {
+        await remoteAudio.setSinkId(preferred.deviceId);
+        return true;
+      }
+    }
+
+    // Some browsers implement selectAudioOutput. It can only be used when the
+    // browser actually exposes an earpiece/receiver output device.
+    if (!speakerOn && navigator.mediaDevices && typeof navigator.mediaDevices.selectAudioOutput === 'function') {
+      try {
+        const selected = await navigator.mediaDevices.selectAudioOutput();
+        if (selected && typeof remoteAudio.setSinkId === 'function') {
+          await remoteAudio.setSinkId(selected.deviceId);
+          return true;
+        }
+      } catch (_) {}
+    }
+
+    return false;
+  }
+
+  async function toggleSpeaker() {
+    if (!isMobileCallDevice) return;
+
+    const previous = isSpeakerOn;
+    const next = !previous;
+    try {
+      const routed = await applyAudioRoute(next);
+      if (!routed && !next) {
+        // Do not pretend the receiver switch happened. Keep the UI truthful.
+        isSpeakerOn = previous;
+        updateSpeakerButton();
+        console.warn('This mobile browser does not expose phone receiver audio routing.');
+        return;
+      }
+      isSpeakerOn = next;
+      updateSpeakerButton();
+    } catch (err) {
+      isSpeakerOn = previous;
+      updateSpeakerButton();
+      console.warn('Audio output switching failed:', err);
+    }
+  }
+
+  if (!isMobileCallDevice) {
+    callSpeakerBtn.style.display = 'none';
   }
 
   function toggleCallMute() {

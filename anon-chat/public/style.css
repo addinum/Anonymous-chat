@@ -1940,3 +1940,14 @@ button:focus-visible, input:focus-visible {
   .call-stat, .call-control { min-height: 50px; }
   .call-stat strong { font-size: 14px; }
 }
+
+/* Audio output control is intentionally mobile-only. Desktop browsers do not
+   have a reliable phone speaker/receiver concept. */
+@media (min-width: 521px) {
+  #callSpeakerBtn { display: none !important; }
+  .call-bar__controls { grid-template-columns: 1.2fr repeat(2, 1fr); }
+}
+
+@media (max-width: 520px) {
+  #callSpeakerBtn { display: flex; }
+}
