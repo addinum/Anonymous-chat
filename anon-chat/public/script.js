@@ -126,7 +126,18 @@
   let callTimerInterval = null;
   let isCallMuted = false;
   let isSpeakerOn = true;
-  const rtcConfig = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+  let pendingIceCandidates = [];
+  let callDisconnectTimer = null;
+  let callReconnectInProgress = false;
+  const rtcConfig = {
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+      { urls: 'stun:stun.cloudflare.com:3478' }
+    ],
+    bundlePolicy: 'max-bundle',
+    rtcpMuxPolicy: 'require'
+  };
 
   // ---------- Persistent device identity (for the inbox feature only) ----------
   const DEVICE_ID_KEY = 'wavelength_device_id';
@@ -1040,32 +1051,36 @@
   }
 
   async function applyAudioRoute(speakerOn) {
-    // Native Android wrapper hook. If the site is later packaged as an Android
-    // WebView, expose Android.setSpeakerphoneOn(boolean) and this becomes a
-    // real speaker/receiver switch. Normal mobile browsers do not expose this
-    // Android AudioManager control to JavaScript.
+    if (!isMobileCallDevice) return false;
+
+    // Native Android bridge: this is the only reliable way to select the
+    // Android loudspeaker vs. the phone's earpiece/receiver.
     if (window.Android && typeof window.Android.setSpeakerphoneOn === 'function') {
       window.Android.setSpeakerphoneOn(!!speakerOn);
       return true;
     }
 
-    // Browser-standard output routing where supported. Most Android Chrome
-    // versions expose only the default output and cannot address the receiver.
+    // Browser output routing is supported only by some browsers/devices.
+    // Never claim receiver mode unless the browser actually exposes an output.
     if (typeof remoteAudio.setSinkId === 'function') {
-      const devices = await navigator.mediaDevices.enumerateDevices();
-      const outputs = devices.filter(d => d.kind === 'audiooutput');
-      const preferred = speakerOn
-        ? (outputs.find(d => /speaker/i.test(d.label)) || outputs.find(d => d.deviceId === 'default') || outputs[0])
-        : outputs.find(d => /earpiece|receiver|communications|telephony/i.test(d.label));
-      if (preferred) {
-        await remoteAudio.setSinkId(preferred.deviceId);
-        return true;
+      try {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const outputs = devices.filter(d => d.kind === 'audiooutput');
+        const speaker = outputs.find(d => /speaker|default/i.test(d.label));
+        const receiver = outputs.find(d => /earpiece|receiver|communications|telephony|headset/i.test(d.label));
+        const target = speakerOn ? (speaker || outputs[0]) : receiver;
+        if (target) {
+          await remoteAudio.setSinkId(target.deviceId);
+          return true;
+        }
+      } catch (err) {
+        console.warn('Browser audio output routing unavailable:', err);
       }
     }
 
-    // Some browsers implement selectAudioOutput. It can only be used when the
-    // browser actually exposes an earpiece/receiver output device.
-    if (!speakerOn && navigator.mediaDevices && typeof navigator.mediaDevices.selectAudioOutput === 'function') {
+    // Some browsers expose selectAudioOutput. It cannot force Android's
+    // hidden receiver unless that receiver is exposed as a selectable device.
+    if (navigator.mediaDevices && typeof navigator.mediaDevices.selectAudioOutput === 'function' && !speakerOn) {
       try {
         const selected = await navigator.mediaDevices.selectAudioOutput();
         if (selected && typeof remoteAudio.setSinkId === 'function') {
@@ -1079,24 +1094,22 @@
   }
 
   async function toggleSpeaker() {
-    if (!isMobileCallDevice) return;
-
-    const previous = isSpeakerOn;
-    const next = !previous;
+    if (!isMobileCallDevice || !activeCallContactId) return;
+    const next = !isSpeakerOn;
     try {
       const routed = await applyAudioRoute(next);
-      if (!routed && !next) {
-        // Do not pretend the receiver switch happened. Keep the UI truthful.
-        isSpeakerOn = previous;
+      if (routed) {
+        isSpeakerOn = next;
         updateSpeakerButton();
-        console.warn('This mobile browser does not expose phone receiver audio routing.');
         return;
       }
-      isSpeakerOn = next;
-      updateSpeakerButton();
+
+      // Keep state honest on normal mobile browsers: JavaScript cannot force
+      // Chrome/Android to use the hidden earpiece. Do not show a fake state.
+      alert(next
+        ? 'Your browser cannot control the phone speaker directly.'
+        : 'Your browser cannot switch to the phone receiver directly. This requires the Android app/audio bridge.');
     } catch (err) {
-      isSpeakerOn = previous;
-      updateSpeakerButton();
       console.warn('Audio output switching failed:', err);
     }
   }
@@ -1117,33 +1130,105 @@
   }
 
   async function createPeerConnection(contactId, isOfferer) {
-    if (peerConnection) peerConnection.close();
+    if (peerConnection) {
+      peerConnection.onconnectionstatechange = null;
+      peerConnection.oniceconnectionstatechange = null;
+      peerConnection.close();
+    }
+    pendingIceCandidates = [];
     peerConnection = new RTCPeerConnection(rtcConfig);
+    const pc = peerConnection;
 
-    peerConnection.onicecandidate = (event) => {
+    pc.onicecandidate = (event) => {
       if (event.candidate) sendCallSignal(contactId, 'ice', event.candidate);
     };
-    peerConnection.ontrack = (event) => {
-      remoteAudio.srcObject = event.streams[0];
-      remoteAudio.play().catch(() => {});
+
+    pc.ontrack = (event) => {
+      const stream = event.streams && event.streams[0];
+      if (!stream) return;
+      remoteAudio.srcObject = stream;
+      remoteAudio.autoplay = true;
+      remoteAudio.playsInline = true;
+      remoteAudio.muted = false;
+      remoteAudio.volume = 1;
+      const playPromise = remoteAudio.play();
+      if (playPromise) playPromise.catch(() => {
+        // A user gesture (accept/call button) will normally unlock playback.
+      });
     };
-    peerConnection.onconnectionstatechange = () => {
-      if (!peerConnection) return;
-      if (['connected'].includes(peerConnection.connectionState)) setCallConnected();
-      if (['failed', 'disconnected', 'closed'].includes(peerConnection.connectionState)) endCall(false);
+
+    pc.onconnectionstatechange = () => {
+      if (pc !== peerConnection) return;
+      const state = pc.connectionState;
+      if (state === 'connected') {
+        clearTimeout(callDisconnectTimer);
+        callDisconnectTimer = null;
+        callReconnectInProgress = false;
+        setCallConnected();
+      } else if (state === 'disconnected') {
+        // Mobile networks can briefly report disconnected during handoff.
+        // Do not end a call immediately; give ICE a chance to recover.
+        clearTimeout(callDisconnectTimer);
+        callDisconnectTimer = setTimeout(() => {
+          if (peerConnection === pc && pc.connectionState === 'disconnected') {
+            try { pc.restartIce(); } catch (_) {}
+          }
+        }, 2500);
+      } else if (state === 'failed') {
+        clearTimeout(callDisconnectTimer);
+        callDisconnectTimer = setTimeout(() => {
+          if (peerConnection === pc && pc.connectionState === 'failed') {
+            endCall(false);
+          }
+        }, 7000);
+      } else if (state === 'closed') {
+        if (activeCallContactId) endCall(false);
+      }
+    };
+
+    pc.oniceconnectionstatechange = () => {
+      if (pc !== peerConnection) return;
+      const state = pc.iceConnectionState;
+      if (state === 'connected' || state === 'completed') {
+        clearTimeout(callDisconnectTimer);
+        callDisconnectTimer = null;
+        callReconnectInProgress = false;
+      } else if (state === 'disconnected') {
+        clearTimeout(callDisconnectTimer);
+        callDisconnectTimer = setTimeout(() => {
+          if (peerConnection === pc && pc.iceConnectionState === 'disconnected') {
+            try { pc.restartIce(); } catch (_) {}
+          }
+        }, 2000);
+      } else if (state === 'failed' && !callReconnectInProgress) {
+        callReconnectInProgress = true;
+        try { pc.restartIce(); } catch (_) {}
+      }
     };
 
     if (!localCallStream) {
-      localCallStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      localCallStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          channelCount: 1,
+          sampleRate: 48000
+        },
+        video: false
+      });
     }
-    localCallStream.getTracks().forEach((track) => peerConnection.addTrack(track, localCallStream));
+    localCallStream.getAudioTracks().forEach(track => {
+      track.enabled = !isCallMuted;
+      pc.addTrack(track, localCallStream);
+    });
 
     if (isOfferer) {
-      const offer = await peerConnection.createOffer();
-      await peerConnection.setLocalDescription(offer);
-      sendCallSignal(contactId, 'offer', peerConnection.localDescription);
+      const offer = await pc.createOffer({ offerToReceiveAudio: true });
+      await pc.setLocalDescription(offer);
+      sendCallSignal(contactId, 'offer', pc.localDescription);
     }
-    return peerConnection;
+    return pc;
   }
 
   async function startCall() {
@@ -1199,6 +1284,10 @@
   }
 
   function endCall(notify = true) {
+    clearTimeout(callDisconnectTimer);
+    callDisconnectTimer = null;
+    callReconnectInProgress = false;
+    pendingIceCandidates = [];
     const contactId = activeCallContactId;
     if (notify && contactId) sendWs('call_end', { toDeviceId: contactId });
     if (peerConnection) {
@@ -1218,20 +1307,31 @@
   async function handleCallSignal(msg) {
     if (!activeCallContactId || msg.fromId !== activeCallContactId || !msg.data) return;
     try {
+      if (!peerConnection) return;
+
       if (msg.signalType === 'accept') {
-        if (!peerConnection) await createPeerConnection(activeCallContactId, false);
-        const offer = await peerConnection.createOffer();
+        const offer = await peerConnection.createOffer({ offerToReceiveAudio: true });
         await peerConnection.setLocalDescription(offer);
         sendCallSignal(activeCallContactId, 'offer', peerConnection.localDescription);
       } else if (msg.signalType === 'offer') {
         await peerConnection.setRemoteDescription(new RTCSessionDescription(msg.data));
+        for (const candidate of pendingIceCandidates.splice(0)) {
+          try { await peerConnection.addIceCandidate(new RTCIceCandidate(candidate)); } catch (_) {}
+        }
         const answer = await peerConnection.createAnswer();
         await peerConnection.setLocalDescription(answer);
         sendCallSignal(activeCallContactId, 'answer', peerConnection.localDescription);
       } else if (msg.signalType === 'answer') {
         await peerConnection.setRemoteDescription(new RTCSessionDescription(msg.data));
+        for (const candidate of pendingIceCandidates.splice(0)) {
+          try { await peerConnection.addIceCandidate(new RTCIceCandidate(candidate)); } catch (_) {}
+        }
       } else if (msg.signalType === 'ice') {
-        await peerConnection.addIceCandidate(new RTCIceCandidate(msg.data));
+        if (peerConnection.remoteDescription && peerConnection.remoteDescription.type) {
+          await peerConnection.addIceCandidate(new RTCIceCandidate(msg.data));
+        } else {
+          pendingIceCandidates.push(msg.data);
+        }
       }
     } catch (err) {
       console.error('call signaling failed:', err);
