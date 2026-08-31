@@ -179,11 +179,22 @@
   <header class="wa-header">
     <button id="threadBackBtn" class="wa-back" aria-label="Back">←</button>
     <span class="wa-avatar" id="threadAvatar">?</span>
-    <span class="wa-header__title" id="threadWithLabel">Contact</span>
+    <div class="wa-header__contact">
+      <span class="wa-header__title" id="threadWithLabel">Contact</span>
+      <span class="wa-header__presence" id="threadPresenceLabel">Offline</span>
+    </div>
     <button type="button" id="callBtn" class="wa-call-btn" aria-label="Call contact" title="Voice call">📞</button>
   </header>
 
   <div class="wa-log" id="threadLog"></div>
+
+  <div id="replyComposer" class="reply-composer hidden">
+    <div class="reply-composer__text">
+      <strong>Replying</strong>
+      <span id="replyComposerPreview">Message</span>
+    </div>
+    <button type="button" id="replyComposerClose" aria-label="Cancel reply">✕</button>
+  </div>
 
   <!-- Voice recording overlay bar (shown instead of the normal input while recording) -->
   <div class="wa-record-bar hidden" id="recordBar">
@@ -256,6 +267,10 @@
     <div class="call-stat">
       <span class="call-stat__label">Duration</span>
       <strong id="callDuration">0:00</strong>
+    </div>
+    <div class="call-stat call-stat--quality">
+      <span class="call-stat__label">Connection</span>
+      <strong id="callQuality">Good</strong>
     </div>
     <button type="button" id="callSpeakerBtn" class="call-control" aria-pressed="false" title="Speaker">🔊<span>Speaker</span></button>
     <button type="button" id="callMuteBtn" class="call-control" aria-pressed="false" title="Mute microphone">🎙️<span>Mute</span></button>
