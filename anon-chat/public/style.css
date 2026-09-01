@@ -2005,3 +2005,19 @@ html.wl-dark, body.wl-dark { background:#000 !important; color:#e5e5e5 !importan
 .wl-dark hr { border-color:#292929 !important; }.wl-dark a { color:#d4d4d4 !important; }
 .wl-dark ::-webkit-scrollbar-track { background:#050505; }.wl-dark ::-webkit-scrollbar-thumb { background:#333;border-radius:8px; }
 #wavelengthDarkModeToggle { border:1px solid #303030 !important;background:#151515 !important;color:#e5e5e5 !important;border-radius:10px;padding:8px 12px;cursor:pointer;font:inherit; }
+
+/* WAVELENGTH DARK MODE - FINAL UI OVERRIDES */
+html.wl-dark, html.wl-dark body { background:#000 !important; color:#e5e5e5 !important; }
+html.wl-dark * { border-color:#2b2b2b !important; }
+html.wl-dark .header, html.wl-dark header, html.wl-dark nav,
+html.wl-dark .sidebar, html.wl-dark .chat-header, html.wl-dark .chat-input,
+html.wl-dark .composer, html.wl-dark .modal, html.wl-dark .card,
+html.wl-dark .panel, html.wl-dark .inbox, html.wl-dark .chat-container {
+  background:#0b0b0b !important; color:#e5e5e5 !important;
+}
+html.wl-dark input, html.wl-dark textarea, html.wl-dark select,
+html.wl-dark button { background:#151515 !important; color:#e5e5e5 !important; }
+html.wl-dark .message, html.wl-dark .message-bubble, html.wl-dark .bubble,
+html.wl-dark .incoming, html.wl-dark .received { background:#171717 !important; color:#e5e5e5 !important; }
+html.wl-dark .sent, html.wl-dark .outgoing, html.wl-dark .own-message { background:#292929 !important; color:#fff !important; }
+html.wl-dark #wavelengthDarkModeToggle { background:#202020 !important; color:#fff !important; border-color:#555 !important; }
