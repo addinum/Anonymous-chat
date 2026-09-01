@@ -293,5 +293,8 @@
 
 <script src="script.js"></script>
 <script>window.GIPHY_API_KEY = window.GIPHY_API_KEY || '';</script>
+<script>
+(function(){const K="wavelength-theme";function apply(d){document.documentElement.classList.toggle("wl-dark",d);document.body.classList.toggle("wl-dark",d);const b=document.getElementById("wavelengthDarkModeToggle");if(b)b.textContent=d?"☀️ Light Mode":"🌙 Dark Mode";}function init(){if(document.getElementById("wavelengthDarkModeToggle"))return;const b=document.createElement("button");b.id="wavelengthDarkModeToggle";b.type="button";b.onclick=function(){const d=!document.documentElement.classList.contains("wl-dark");localStorage.setItem(K,d?"dark":"light");apply(d);};const h=document.querySelector(".header")||document.querySelector("header")||document.querySelector("nav")||document.querySelector(".top-bar")||document.body;h.appendChild(b);apply(localStorage.getItem(K)==="dark");}apply(localStorage.getItem(K)==="dark");document.readyState==="loading"?document.addEventListener("DOMContentLoaded",init):init();})();
+</script>
 </body>
 </html>
