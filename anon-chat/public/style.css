@@ -2021,3 +2021,51 @@ html.wl-dark .message, html.wl-dark .message-bubble, html.wl-dark .bubble,
 html.wl-dark .incoming, html.wl-dark .received { background:#171717 !important; color:#e5e5e5 !important; }
 html.wl-dark .sent, html.wl-dark .outgoing, html.wl-dark .own-message { background:#292929 !important; color:#fff !important; }
 html.wl-dark #wavelengthDarkModeToggle { background:#202020 !important; color:#fff !important; border-color:#555 !important; }
+
+/* ===== DARK MODE TOGGLE: HOMEPAGE ONLY ===== */
+.wl-dark-toggle {
+  position: absolute;
+  top: 14px;
+  right: 14px;
+  z-index: 20;
+  padding: 9px 13px;
+  border: 1px solid #444 !important;
+  border-radius: 10px;
+  background: #151515 !important;
+  color: #eee !important;
+  cursor: pointer;
+  font: 600 13px Arial, sans-serif;
+  box-shadow: 0 4px 14px rgba(0,0,0,.25);
+}
+.wl-dark-toggle:hover { background: #222 !important; }
+
+/* In dark mode, outgoing messages are neutral grey instead of pink. */
+html.wl-dark .wa-bubble--me {
+  background: #2b2b2b !important;
+  color: #f1f1f1 !important;
+  border-color: #414141 !important;
+  box-shadow: 0 3px 12px rgba(0,0,0,.45) !important;
+}
+html.wl-dark .wa-bubble--them {
+  background: #171717 !important;
+  color: #e6e6e6 !important;
+  border-color: #303030 !important;
+}
+html.wl-dark .wa-bubble--me .wa-bubble__time { color: #999 !important; }
+html.wl-dark .wa-bubble--me .wa-tick { color: #aaa !important; text-shadow: none !important; }
+html.wl-dark .wa-bubble--me .wa-tick--read { color: #d6d6d6 !important; text-shadow: none !important; }
+
+/* Dark GIF bubbles should also stay neutral grey. */
+html.wl-dark .wa-gif-bubble.wa-bubble--me {
+  background: #202020 !important;
+  border-color: #3a3a3a !important;
+}
+
+@media (max-width: 520px) {
+  .wl-dark-toggle {
+    top: 12px;
+    right: 12px;
+    padding: 8px 11px;
+    font-size: 12px;
+  }
+}
