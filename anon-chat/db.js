@@ -27,7 +27,7 @@ contactSchema.index({ ownerId: 1, contactId: 1 }, { unique: true });
 const messageSchema = new mongoose.Schema({
   fromId: { type: String, required: true, index: true },
   toId: { type: String, required: true, index: true },
-  msgType: { type: String, enum: ['text', 'voice', 'gif'], default: 'text' },
+  msgType: { type: String, enum: ['text', 'voice', 'gif', 'file'], default: 'text' },
   text: { type: String, default: '' },
   gifData: { type: String, default: null },
   audioData: { type: String, default: null }, // base64-encoded audio, voice notes only
@@ -225,7 +225,7 @@ async function getContacts(ownerId) {
         name: c.contactName,
         avatar: c.contactAvatar || 'boy1',
         unreadCount,
-        lastMessage: lastMsg ? (lastMsg.msgType === 'voice' ? '🎤 Voice message' : lastMsg.msgType === 'gif' ? '🎞️ GIF' : lastMsg.text) : null,
+        lastMessage: lastMsg ? (lastMsg.msgType === 'voice' ? '🎤 Voice message' : lastMsg.msgType === 'gif' ? '🎞️ GIF' : lastMsg.msgType === 'file' ? `📎 ${lastMsg.fileName || 'File'}` : lastMsg.text) : null,
         lastAt: lastMsg ? lastMsg.createdAt : c.createdAt,
         online: false,
         lastSeenAt: c.lastSeenAt || c.createdAt,
@@ -273,19 +273,43 @@ async function saveGifMessage(fromId, toId, gifData, replyTo = null) {
   }
 }
 
-async function getThread(userA, userB) {
-  if (!isReady()) return [];
+async function saveFileMessage(fromId, toId, fileData, fileName, fileMimeType, fileSize, replyTo = null) {
+  if (!isReady()) return null;
   try {
-    const messages = await Message.find({
+    const msg = await Message.create({
+      fromId, toId, msgType: 'file', fileData, fileName, fileMimeType, fileSize,
+      replyTo: replyTo || undefined
+    });
+    return msg;
+  } catch (err) {
+    console.error('saveFileMessage failed:', err.message);
+    return null;
+  }
+}
+
+async function getThreadPage(userA, userB, limit = 30, beforeId = null) {
+  if (!isReady()) return { messages: [], hasMore: false, oldestId: null };
+  try {
+    const safeLimit = Math.min(Math.max(Number(limit) || 30, 10), 50);
+    const query = {
       $or: [
         { fromId: userA, toId: userB },
         { fromId: userB, toId: userA },
       ],
-    }).sort({ createdAt: 1 }).lean();
-    return messages;
+    };
+    if (beforeId && mongoose.isValidObjectId(beforeId)) {
+      query._id = { $lt: beforeId };
+    }
+    const rows = await Message.find(query)
+      .sort({ _id: -1 })
+      .limit(safeLimit + 1)
+      .lean();
+    const hasMore = rows.length > safeLimit;
+    const messages = rows.slice(0, safeLimit).reverse();
+    return { messages, hasMore, oldestId: messages.length ? String(messages[0]._id) : null };
   } catch (err) {
-    console.error('getThread failed:', err.message);
-    return [];
+    console.error('getThreadPage failed:', err.message);
+    return { messages: [], hasMore: false, oldestId: null };
   }
 }
 
@@ -357,7 +381,8 @@ module.exports = {
   saveMessage,
   saveVoiceMessage,
   saveGifMessage,
-  getThread,
+  saveFileMessage,
+  getThreadPage,
   markThreadRead,
   markMessageDelivered,
   markMessagesRead,
