@@ -2565,3 +2565,131 @@
   updateAccountBarDisplay();
   connectSocket();
 })();
+
+
+/* =========================================================
+   ANDROID / MOBILE BACK BUTTON NAVIGATION
+   Home is the root. Back from any inner tab/screen returns
+   to Home. Back on Home shows the native-looking close dialog.
+   ========================================================= */
+(function setupWavelengthBackButton() {
+  let backGuardReady = false;
+  let closeDialog = null;
+  let suppressNextPop = false;
+
+  function currentTab() {
+    const active = document.querySelector('.bottom-nav .active, .bottom-nav button.active, [data-tab].active');
+    if (active) return active.getAttribute('data-tab') || active.dataset.tab || '';
+    return window.currentTab || '';
+  }
+
+  function isHomeVisible() {
+    const home = document.querySelector('#home, #homeTab, [data-screen="home"]');
+    if (home) {
+      const style = getComputedStyle(home);
+      return style.display !== 'none' && style.visibility !== 'hidden' && !home.classList.contains('hidden');
+    }
+    return !location.hash || location.hash === '#home';
+  }
+
+  function goHomeFromBack() {
+    const homeButton =
+      document.querySelector('[data-tab="home"]') ||
+      document.querySelector('#homeTabBtn') ||
+      document.querySelector('#homeBtn') ||
+      Array.from(document.querySelectorAll('button, a')).find(el =>
+        (el.textContent || '').trim().toLowerCase() === 'home'
+      );
+    if (homeButton) {
+      homeButton.click();
+      return true;
+    }
+    if (typeof window.showTab === 'function') {
+      try { window.showTab('home'); return true; } catch (_) {}
+    }
+    return false;
+  }
+
+  function createCloseDialog() {
+    if (closeDialog) return closeDialog;
+
+    closeDialog = document.createElement('div');
+    closeDialog.id = 'wavelengthCloseDialog';
+    closeDialog.className = 'wavelength-close-overlay';
+    closeDialog.innerHTML = `
+      <div class="wavelength-close-dialog" role="dialog" aria-modal="true" aria-labelledby="wavelengthCloseTitle">
+        <div class="wavelength-close-mark">✦</div>
+        <div class="wavelength-close-kicker">WAVELENGTH</div>
+        <h2 id="wavelengthCloseTitle">Do you want to close this app?</h2>
+        <p>You are on the Home page.</p>
+        <div class="wavelength-close-actions">
+          <button type="button" class="wavelength-close-no">No</button>
+          <button type="button" class="wavelength-close-yes">Yes</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(closeDialog);
+
+    const hide = () => {
+      closeDialog.classList.remove('show');
+      document.body.classList.remove('wavelength-dialog-open');
+    };
+
+    closeDialog.querySelector('.wavelength-close-no').addEventListener('click', hide);
+    closeDialog.addEventListener('click', e => {
+      if (e.target === closeDialog) hide();
+    });
+
+    closeDialog.querySelector('.wavelength-close-yes').addEventListener('click', () => {
+      // Browsers only permit window.close() for windows opened by script.
+      // Attempt it first; if Chrome blocks it, leave the user on the app
+      // rather than navigating to an unrelated page.
+      try { window.close(); } catch (_) {}
+      setTimeout(() => {
+        if (!document.hidden) {
+          closeDialog.querySelector('.wavelength-close-yes').textContent = 'Close this tab';
+        }
+      }, 250);
+    });
+
+    return closeDialog;
+  }
+
+  function showCloseDialog() {
+    const dialog = createCloseDialog();
+    dialog.classList.add('show');
+    document.body.classList.add('wavelength-dialog-open');
+  }
+
+  function seedBackHistory() {
+    if (backGuardReady) return;
+    backGuardReady = true;
+    // Keep one guard entry behind the current app state.
+    history.replaceState({ wavelength: 'home' }, '', location.href);
+    history.pushState({ wavelength: 'guard' }, '', location.href);
+  }
+
+  window.addEventListener('popstate', () => {
+    if (suppressNextPop) {
+      suppressNextPop = false;
+      return;
+    }
+
+    // Android back from an inner tab/chat: return to Home and consume
+    // the browser history entry so Chrome does not leave the app.
+    if (!isHomeVisible()) {
+      goHomeFromBack();
+      history.pushState({ wavelength: 'guard' }, '', location.href);
+      return;
+    }
+
+    // Back on Home: restore the guard entry and show the in-app dialog.
+    history.pushState({ wavelength: 'guard' }, '', location.href);
+    showCloseDialog();
+  });
+
+  document.addEventListener('DOMContentLoaded', () => {
+    setTimeout(seedBackHistory, 50);
+  });
+  if (document.readyState !== 'loading') setTimeout(seedBackHistory, 50);
+})();

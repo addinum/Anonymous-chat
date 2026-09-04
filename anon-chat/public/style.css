@@ -2675,3 +2675,129 @@ html.wl-dark .file-viewer-header { border-color:#292929 !important; }
   #settings .settings-card { padding: 13px; }
   #settings .settings-avatar-preview { width: 52px; height: 52px; }
 }
+
+
+/* =========================================================
+   WAVELENGTH CLOSE-APP DIALOG
+   ========================================================= */
+.wavelength-dialog-open {
+  overflow: hidden !important;
+}
+
+.wavelength-close-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 99999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 22px;
+  background: rgba(3, 1, 7, .72);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity .18s ease;
+}
+
+.wavelength-close-overlay.show {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.wavelength-close-dialog {
+  width: min(100%, 360px);
+  box-sizing: border-box;
+  padding: 24px 20px 18px;
+  border: 1px solid rgba(255, 75, 184, .35);
+  border-radius: 24px;
+  background:
+    radial-gradient(circle at 50% 0%, rgba(255, 63, 181, .16), transparent 42%),
+    rgba(12, 8, 15, .96);
+  box-shadow: 0 24px 70px rgba(0,0,0,.6), 0 0 35px rgba(255, 0, 153, .12);
+  transform: translateY(10px) scale(.98);
+  transition: transform .18s ease;
+  text-align: center;
+}
+
+.wavelength-close-overlay.show .wavelength-close-dialog {
+  transform: translateY(0) scale(1);
+}
+
+.wavelength-close-mark {
+  width: 48px;
+  height: 48px;
+  margin: 0 auto 12px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: rgba(255,255,255,.06);
+  border: 1px solid rgba(255, 75, 184, .3);
+  font-size: 23px;
+}
+
+.wavelength-close-kicker {
+  margin-bottom: 7px;
+  color: #ff63c3;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .22em;
+}
+
+.wavelength-close-dialog h2 {
+  margin: 0;
+  color: #fff;
+  font-size: 21px;
+  line-height: 1.18;
+}
+
+.wavelength-close-dialog p {
+  margin: 9px 0 20px;
+  color: rgba(255,255,255,.58);
+  font-size: 13px;
+}
+
+.wavelength-close-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.wavelength-close-actions button {
+  min-height: 46px;
+  border-radius: 14px;
+  border: 1px solid rgba(255,255,255,.12);
+  font: inherit;
+  font-weight: 750;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.wavelength-close-no {
+  color: #fff;
+  background: rgba(255,255,255,.07);
+}
+
+.wavelength-close-yes {
+  color: #fff;
+  border-color: rgba(255, 44, 164, .3) !important;
+  background: linear-gradient(135deg, rgba(255, 39, 166, .34), rgba(108, 41, 147, .34));
+  box-shadow: 0 8px 24px rgba(255, 0, 153, .14);
+}
+
+.wavelength-close-actions button:active {
+  transform: scale(.98);
+}
+
+@media (max-width: 380px) {
+  .wavelength-close-overlay {
+    padding: 16px;
+  }
+  .wavelength-close-dialog {
+    padding: 21px 16px 16px;
+    border-radius: 21px;
+  }
+  .wavelength-close-dialog h2 {
+    font-size: 19px;
+  }
+}

@@ -82,3 +82,11 @@ The private VAPID key must stay in Render environment variables and must not be 
 - Settings cards are now full-width and responsive on narrow Android screens.
 - Profile editing, avatars, account management, phone notifications, test push, theme toggle, inbox, stranger matching, contacts, chat, GIFs, voice notes, files, calls, replies, reactions, edit/delete, receipts, pagination, and presence are retained.
 - `public/avatars/` is intentionally excluded from this ZIP.
+
+
+## Android back-button behavior
+- Back from Settings, Inbox, or an active inner screen returns to Home.
+- Back from Home opens the Wavelength-styled close confirmation dialog.
+- No keeps the user on Home.
+- Yes attempts to close the browser window/tab when the browser permits it.
+- Android Chrome does not allow ordinary web pages to forcibly close a user-opened tab; this is a browser security restriction.
