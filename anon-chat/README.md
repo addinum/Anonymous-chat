@@ -90,3 +90,11 @@ The private VAPID key must stay in Render environment variables and must not be 
 - No keeps the user on Home.
 - Yes attempts to close the browser window/tab when the browser permits it.
 - Android Chrome does not allow ordinary web pages to forcibly close a user-opened tab; this is a browser security restriction.
+
+
+## Corrected Back-button behavior
+- Back from Home only: opens the in-app close confirmation.
+- Back from Settings: returns directly to Home, no dialog.
+- Back from Inbox: returns directly to Home, no dialog.
+- Back from a contact thread/live chat: returns directly to Home, no dialog.
+- The close dialog is never shown from Settings, Inbox, or Chat.
