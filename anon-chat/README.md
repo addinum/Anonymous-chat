@@ -74,3 +74,11 @@ Wavelength now supports Web Push notifications for inbox messages. When a contac
 5. Open Wavelength on the phone and press **Find a stranger** once, then allow notifications when the browser asks.
 
 The private VAPID key must stay in Render environment variables and must not be committed to GitHub.
+
+
+## Final mobile tab release
+
+- Home / Inbox / Settings bottom navigation retained.
+- Settings cards are now full-width and responsive on narrow Android screens.
+- Profile editing, avatars, account management, phone notifications, test push, theme toggle, inbox, stranger matching, contacts, chat, GIFs, voice notes, files, calls, replies, reactions, edit/delete, receipts, pagination, and presence are retained.
+- `public/avatars/` is intentionally excluded from this ZIP.
