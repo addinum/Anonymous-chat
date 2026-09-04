@@ -491,124 +491,14 @@
   setInterval(() => { dialFreq.textContent = randomFreq(); }, 900);
 
   // ---------- Android / browser Back button ----------
-  // One persistent history sentinel is kept at the app boundary.
-  // Inner screens return to Home without showing the exit dialog.
-  // Only a Back action while Home is already visible shows the dialog.
+  // App navigation uses one browser-history guard:
+  //   Home -> Android Back => Wavelength exit dialog
+  //   Any other screen -> Android Back => Home
+  // The Yes button intentionally navigates to Google instead of trying to
+  // force-close the Chrome tab (Chrome blocks normal web pages from doing so).
   let wavelengthBackReady = false;
   let wavelengthCloseDialog = null;
   let wavelengthBackBusy = false;
-
-  function pushNavState(screenName) {
-    // Tab switches should not create browser-history entries. The app's
-    // sentinel handles Android Back consistently.
-    history.replaceState({ wavelengthScreen: screenName }, '', location.href);
-  }
-
-  function pushChatHistoryState() {
-    if (!chatHistoryPushed) {
-      history.pushState({ wavelengthScreen: 'chat' }, '', location.href);
-      chatHistoryPushed = true;
-    }
-  }
-
-  function exitChatToLanding() {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'leave' }));
-    }
-    emojiPanel.classList.add('hidden');
-    showScreen('landing');
-    refreshInboxBadge();
-  }
-
-  function isHomeScreen() {
-    return screens.landing && !screens.landing.classList.contains('hidden');
-  }
-
-  function createCloseDialog() {
-    if (wavelengthCloseDialog) return wavelengthCloseDialog;
-
-    const overlay = document.createElement('div');
-    overlay.id = 'wavelengthCloseDialog';
-    overlay.className = 'wavelength-close-overlay';
-    overlay.innerHTML = `
-      <div class="wavelength-close-dialog" role="dialog" aria-modal="true" aria-labelledby="wavelengthCloseTitle">
-        <div class="wavelength-close-mark">✦</div>
-        <div class="wavelength-close-kicker">WAVELENGTH</div>
-        <h2 id="wavelengthCloseTitle">Do you want to close this app?</h2>
-        <p>Are you sure you want to leave Wavelength?</p>
-        <div class="wavelength-close-actions">
-          <button type="button" class="wavelength-close-no">No</button>
-          <button type="button" class="wavelength-close-yes">Yes</button>
-        </div>
-      </div>
-    `;
-    document.body.appendChild(overlay);
-
-    const hide = () => {
-      overlay.classList.remove('show');
-      document.body.classList.remove('wavelength-dialog-open');
-    };
-
-    overlay.querySelector('.wavelength-close-no').addEventListener('click', () => {
-      hide();
-    });
-
-    overlay.addEventListener('click', (event) => {
-      if (event.target === overlay) hide();
-    });
-
-    overlay.querySelector('.wavelength-close-yes').addEventListener('click', () => {
-      // Chrome will close a script-opened window. A normal user-opened
-      // Chrome tab cannot be force-closed by website JavaScript.
-      try { window.close(); } catch (_) {}
-    });
-
-    wavelengthCloseDialog = overlay;
-    return overlay;
-  }
-
-  function showCloseDialog() {
-    const dialog = createCloseDialog();
-    dialog.classList.add('show');
-    document.body.classList.add('wavelength-dialog-open');
-  }
-
-  function prepareWavelengthBackGuard() {
-    if (wavelengthBackReady) return;
-    wavelengthBackReady = true;
-
-    // Create a single app-boundary sentinel. The visible app URL does not
-  // ---------- Back button navigation ----------
-  // Android Back behavior:
-  //   Settings / Inbox / Chat -> Home
-  //   Home -> close confirmation dialog
-  // Never show the close dialog from an inner screen.
-  let wavelengthBackReady = false;
-  let wavelengthCloseDialog = null;
-  let wavelengthBackBusy = false;
-
-  function pushNavState(screenName) {
-    // Tab changes are app navigation, not browser navigation.
-    history.replaceState({ wavelengthScreen: screenName, wavelengthApp: true }, '', location.href);
-    ensureWavelengthBackGuard();
-  }
-
-  function pushChatHistoryState() {
-    if (!chatHistoryPushed) {
-      history.pushState({ wavelengthScreen: 'chat', wavelengthApp: true }, '', location.href);
-      chatHistoryPushed = true;
-    }
-  }
-
-  function exitChatToLanding() {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      try { ws.send(JSON.stringify({ type: 'leave' })); } catch (_) {}
-    }
-    emojiPanel.classList.add('hidden');
-    showScreen('landing');
-    refreshInboxBadge();
-    ensureWavelengthBackGuard();
-  }
 
   function isHomeScreen() {
     return !!(screens.landing && !screens.landing.classList.contains('hidden'));
@@ -640,11 +530,13 @@
     };
 
     overlay.querySelector('.wavelength-close-no').addEventListener('click', hide);
-    overlay.addEventListener('click', e => {
-      if (e.target === overlay) hide();
+    overlay.addEventListener('click', (event) => {
+      if (event.target === overlay) hide();
     });
     overlay.querySelector('.wavelength-close-yes').addEventListener('click', () => {
-      try { window.close(); } catch (_) {}
+      // A normal Chrome tab cannot be force-closed by page JavaScript.
+      // Go to Google's homepage instead, as requested.
+      window.location.assign('https://www.google.com/');
     });
 
     wavelengthCloseDialog = overlay;
@@ -659,7 +551,9 @@
 
   function ensureWavelengthBackGuard() {
     if (!wavelengthBackReady) return;
-    if (!history.state || !history.state.wavelengthGuard) {
+    // The last history entry is always our guard. It has the same URL,
+    // so pressing Android Back triggers popstate without leaving the site.
+    if (!history.state || history.state.wavelengthGuard !== true) {
       history.pushState({ wavelengthGuard: true, wavelengthApp: true }, '', location.href);
     }
   }
@@ -668,21 +562,37 @@
     if (wavelengthBackReady) return;
     wavelengthBackReady = true;
 
-    // Keep two entries at the app boundary: the Home state and a guard.
-    // Android Chrome Back pops the guard and fires popstate while the app
-    // remains on the same URL.
+    // Preserve the current page as the app's Home boundary, then add one
+    // guard entry above it. Do not create a chain for tabs.
     history.replaceState({ wavelengthScreen: 'landing', wavelengthApp: true }, '', location.href);
     history.pushState({ wavelengthGuard: true, wavelengthApp: true }, '', location.href);
   }
 
+  function pushChatHistoryState() {
+    if (!chatHistoryPushed) {
+      history.pushState({ wavelengthScreen: 'chat', wavelengthApp: true }, '', location.href);
+      chatHistoryPushed = true;
+    }
+  }
+
+  // Called by the existing tab navigation. It must never add a browser
+  // history entry, because tabs are internal app navigation.
+  function pushNavState(screenName) {
+    history.replaceState({ wavelengthScreen: screenName, wavelengthApp: true }, '', location.href);
+    ensureWavelengthBackGuard();
+  }
+
   window.addEventListener('popstate', () => {
-    if (wavelengthBackBusy) return;
+    if (!wavelengthBackReady || wavelengthBackBusy) return;
     wavelengthBackBusy = true;
 
-    const wasHome = isHomeScreen();
-
-    if (!wasHome) {
-      // Inner screen -> Home. Do not show close dialog.
+    if (isHomeScreen()) {
+      // Home -> show the exit dialog. Put the guard back immediately so a
+      // second Back press cannot escape the page while the dialog is open.
+      ensureWavelengthBackGuard();
+      showCloseDialog();
+    } else {
+      // Any inner screen -> Home. Never show the exit dialog here.
       if (screens.chat && !screens.chat.classList.contains('hidden')) {
         chatHistoryPushed = false;
         if (ws && ws.readyState === WebSocket.OPEN) {
@@ -705,20 +615,16 @@
       showScreen('landing');
       refreshInboxBadge();
       ensureWavelengthBackGuard();
-    } else {
-      // Home -> close dialog. Re-create the guard immediately.
-      ensureWavelengthBackGuard();
-      showCloseDialog();
     }
 
-    setTimeout(() => { wavelengthBackBusy = false; }, 100);
+    setTimeout(() => { wavelengthBackBusy = false; }, 120);
   });
 
   document.addEventListener('DOMContentLoaded', () => {
-    setTimeout(prepareWavelengthBackGuard, 150);
+    setTimeout(prepareWavelengthBackGuard, 100);
   });
   if (document.readyState !== 'loading') {
-    setTimeout(prepareWavelengthBackGuard, 150);
+    setTimeout(prepareWavelengthBackGuard, 100);
   }
 
   // ---------- Sound + browser notification ----------
