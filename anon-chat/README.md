@@ -97,3 +97,10 @@ The private VAPID key must stay in Render environment variables and must not be 
 - A single persistent history sentinel handles Android Back.
 - Settings/Inbox/Chat Back returns to Home without the exit dialog.
 - Home Back alone opens the close-app dialog.
+
+
+## Exit dialog v2
+- Maintains a dedicated browser-history guard after the Home state.
+- Home Back opens the close dialog.
+- Settings, Inbox, and Chat Back return to Home without the dialog.
+- Tab switching remains functional.

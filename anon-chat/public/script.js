@@ -578,33 +578,111 @@
     wavelengthBackReady = true;
 
     // Create a single app-boundary sentinel. The visible app URL does not
-    // change, but Android Chrome Back now produces a popstate event.
-    history.replaceState(
-      { wavelengthScreen: 'landing', wavelengthRoot: true },
-      '',
-      location.href
-    );
-    history.pushState(
-      { wavelengthScreen: 'landing', wavelengthGuard: true },
-      '',
-      location.href
-    );
+  // ---------- Back button navigation ----------
+  // Android Back behavior:
+  //   Settings / Inbox / Chat -> Home
+  //   Home -> close confirmation dialog
+  // Never show the close dialog from an inner screen.
+  let wavelengthBackReady = false;
+  let wavelengthCloseDialog = null;
+  let wavelengthBackBusy = false;
+
+  function pushNavState(screenName) {
+    // Tab changes are app navigation, not browser navigation.
+    history.replaceState({ wavelengthScreen: screenName, wavelengthApp: true }, '', location.href);
+    ensureWavelengthBackGuard();
+  }
+
+  function pushChatHistoryState() {
+    if (!chatHistoryPushed) {
+      history.pushState({ wavelengthScreen: 'chat', wavelengthApp: true }, '', location.href);
+      chatHistoryPushed = true;
+    }
+  }
+
+  function exitChatToLanding() {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      try { ws.send(JSON.stringify({ type: 'leave' })); } catch (_) {}
+    }
+    emojiPanel.classList.add('hidden');
+    showScreen('landing');
+    refreshInboxBadge();
+    ensureWavelengthBackGuard();
+  }
+
+  function isHomeScreen() {
+    return !!(screens.landing && !screens.landing.classList.contains('hidden'));
+  }
+
+  function createCloseDialog() {
+    if (wavelengthCloseDialog) return wavelengthCloseDialog;
+
+    const overlay = document.createElement('div');
+    overlay.id = 'wavelengthCloseDialog';
+    overlay.className = 'wavelength-close-overlay';
+    overlay.innerHTML = `
+      <div class="wavelength-close-dialog" role="dialog" aria-modal="true" aria-labelledby="wavelengthCloseTitle">
+        <div class="wavelength-close-mark">✦</div>
+        <div class="wavelength-close-kicker">WAVELENGTH</div>
+        <h2 id="wavelengthCloseTitle">Do you want to close this app?</h2>
+        <p>Are you sure you want to leave Wavelength?</p>
+        <div class="wavelength-close-actions">
+          <button type="button" class="wavelength-close-no">No</button>
+          <button type="button" class="wavelength-close-yes">Yes</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+
+    const hide = () => {
+      overlay.classList.remove('show');
+      document.body.classList.remove('wavelength-dialog-open');
+    };
+
+    overlay.querySelector('.wavelength-close-no').addEventListener('click', hide);
+    overlay.addEventListener('click', e => {
+      if (e.target === overlay) hide();
+    });
+    overlay.querySelector('.wavelength-close-yes').addEventListener('click', () => {
+      try { window.close(); } catch (_) {}
+    });
+
+    wavelengthCloseDialog = overlay;
+    return overlay;
+  }
+
+  function showCloseDialog() {
+    const dialog = createCloseDialog();
+    dialog.classList.add('show');
+    document.body.classList.add('wavelength-dialog-open');
+  }
+
+  function ensureWavelengthBackGuard() {
+    if (!wavelengthBackReady) return;
+    if (!history.state || !history.state.wavelengthGuard) {
+      history.pushState({ wavelengthGuard: true, wavelengthApp: true }, '', location.href);
+    }
+  }
+
+  function prepareWavelengthBackGuard() {
+    if (wavelengthBackReady) return;
+    wavelengthBackReady = true;
+
+    // Keep two entries at the app boundary: the Home state and a guard.
+    // Android Chrome Back pops the guard and fires popstate while the app
+    // remains on the same URL.
+    history.replaceState({ wavelengthScreen: 'landing', wavelengthApp: true }, '', location.href);
+    history.pushState({ wavelengthGuard: true, wavelengthApp: true }, '', location.href);
   }
 
   window.addEventListener('popstate', () => {
     if (wavelengthBackBusy) return;
     wavelengthBackBusy = true;
 
-    // Always restore the sentinel immediately so Chrome does not leave
-    // Wavelength while this handler decides what Back means.
-    history.pushState(
-      { wavelengthScreen: isHomeScreen() ? 'landing' : 'back-guard', wavelengthGuard: true },
-      '',
-      location.href
-    );
+    const wasHome = isHomeScreen();
 
-    if (!isHomeScreen()) {
-      // Settings / Inbox / any chat -> Home. NEVER show exit dialog here.
+    if (!wasHome) {
+      // Inner screen -> Home. Do not show close dialog.
       if (screens.chat && !screens.chat.classList.contains('hidden')) {
         chatHistoryPushed = false;
         if (ws && ws.readyState === WebSocket.OPEN) {
@@ -626,21 +704,24 @@
 
       showScreen('landing');
       refreshInboxBadge();
+      ensureWavelengthBackGuard();
     } else {
-      // HOME ONLY -> close dialog.
+      // Home -> close dialog. Re-create the guard immediately.
+      ensureWavelengthBackGuard();
       showCloseDialog();
     }
 
-    setTimeout(() => { wavelengthBackBusy = false; }, 50);
+    setTimeout(() => { wavelengthBackBusy = false; }, 100);
   });
 
   document.addEventListener('DOMContentLoaded', () => {
-    setTimeout(prepareWavelengthBackGuard, 100);
+    setTimeout(prepareWavelengthBackGuard, 150);
   });
   if (document.readyState !== 'loading') {
-    setTimeout(prepareWavelengthBackGuard, 100);
+    setTimeout(prepareWavelengthBackGuard, 150);
   }
 
+  // ---------- Sound + browser notification ----------
   // ---------- Sound + browser notification ----------
   let audioCtx = null;
   function playBeep() {
