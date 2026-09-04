@@ -490,19 +490,23 @@
   }
   setInterval(() => { dialFreq.textContent = randomFreq(); }, 900);
 
-  // ---------- Back button navigation ----------
-  // Keep the app's existing navigation helpers intact. The hardware/browser
-  // Back policy is intentionally simple:
-  //   * Chat / Thread / Inbox / Settings -> Home
-  //   * Home -> show the Wavelength close dialog
-  // No close dialog is ever shown from an inner screen.
+  // ---------- Android / browser Back button ----------
+  // One persistent history sentinel is kept at the app boundary.
+  // Inner screens return to Home without showing the exit dialog.
+  // Only a Back action while Home is already visible shows the dialog.
+  let wavelengthBackReady = false;
+  let wavelengthCloseDialog = null;
+  let wavelengthBackBusy = false;
+
   function pushNavState(screenName) {
-    history.pushState({ screen: screenName }, '', location.href);
+    // Tab switches should not create browser-history entries. The app's
+    // sentinel handles Android Back consistently.
+    history.replaceState({ wavelengthScreen: screenName }, '', location.href);
   }
 
   function pushChatHistoryState() {
     if (!chatHistoryPushed) {
-      pushNavState('chat');
+      history.pushState({ wavelengthScreen: 'chat' }, '', location.href);
       chatHistoryPushed = true;
     }
   }
@@ -515,9 +519,6 @@
     showScreen('landing');
     refreshInboxBadge();
   }
-
-  let wavelengthBackReady = false;
-  let wavelengthCloseDialog = null;
 
   function isHomeScreen() {
     return screens.landing && !screens.landing.classList.contains('hidden');
@@ -548,11 +549,17 @@
       document.body.classList.remove('wavelength-dialog-open');
     };
 
-    overlay.querySelector('.wavelength-close-no').addEventListener('click', hide);
+    overlay.querySelector('.wavelength-close-no').addEventListener('click', () => {
+      hide();
+    });
+
     overlay.addEventListener('click', (event) => {
       if (event.target === overlay) hide();
     });
+
     overlay.querySelector('.wavelength-close-yes').addEventListener('click', () => {
+      // Chrome will close a script-opened window. A normal user-opened
+      // Chrome tab cannot be force-closed by website JavaScript.
       try { window.close(); } catch (_) {}
     });
 
@@ -569,27 +576,49 @@
   function prepareWavelengthBackGuard() {
     if (wavelengthBackReady) return;
     wavelengthBackReady = true;
-    history.replaceState({ wavelength: 'home-root' }, '', location.href);
-    history.pushState({ wavelength: 'home-guard' }, '', location.href);
+
+    // Create a single app-boundary sentinel. The visible app URL does not
+    // change, but Android Chrome Back now produces a popstate event.
+    history.replaceState(
+      { wavelengthScreen: 'landing', wavelengthRoot: true },
+      '',
+      location.href
+    );
+    history.pushState(
+      { wavelengthScreen: 'landing', wavelengthGuard: true },
+      '',
+      location.href
+    );
   }
 
   window.addEventListener('popstate', () => {
-    // Inner screens NEVER show the close dialog.
+    if (wavelengthBackBusy) return;
+    wavelengthBackBusy = true;
+
+    // Always restore the sentinel immediately so Chrome does not leave
+    // Wavelength while this handler decides what Back means.
+    history.pushState(
+      { wavelengthScreen: isHomeScreen() ? 'landing' : 'back-guard', wavelengthGuard: true },
+      '',
+      location.href
+    );
+
     if (!isHomeScreen()) {
+      // Settings / Inbox / any chat -> Home. NEVER show exit dialog here.
       if (screens.chat && !screens.chat.classList.contains('hidden')) {
         chatHistoryPushed = false;
         if (ws && ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: 'leave' }));
+          try { ws.send(JSON.stringify({ type: 'leave' })); } catch (_) {}
         }
         emojiPanel.classList.add('hidden');
       }
 
       if (screens.thread && !screens.thread.classList.contains('hidden')) {
         if (mediaRecorder && mediaRecorder.state === 'recording') {
-          stopRecording(false);
+          try { stopRecording(false); } catch (_) {}
         }
         if (ws && ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify({ type: 'close_thread' }));
+          try { ws.send(JSON.stringify({ type: 'close_thread' })); } catch (_) {}
         }
         currentThreadContactId = null;
         sendWs('get_contacts');
@@ -597,20 +626,19 @@
 
       showScreen('landing');
       refreshInboxBadge();
-      history.pushState({ wavelength: 'home-guard' }, '', location.href);
-      return;
+    } else {
+      // HOME ONLY -> close dialog.
+      showCloseDialog();
     }
 
-    // Only Home gets the close confirmation.
-    history.pushState({ wavelength: 'home-guard' }, '', location.href);
-    showCloseDialog();
+    setTimeout(() => { wavelengthBackBusy = false; }, 50);
   });
 
   document.addEventListener('DOMContentLoaded', () => {
-    setTimeout(prepareWavelengthBackGuard, 50);
+    setTimeout(prepareWavelengthBackGuard, 100);
   });
   if (document.readyState !== 'loading') {
-    setTimeout(prepareWavelengthBackGuard, 50);
+    setTimeout(prepareWavelengthBackGuard, 100);
   }
 
   // ---------- Sound + browser notification ----------

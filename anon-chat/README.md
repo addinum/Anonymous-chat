@@ -90,3 +90,10 @@ The private VAPID key must stay in Render environment variables and must not be 
 - Only Home shows the close-app dialog.
 - Existing tab navigation and chat controls are preserved.
 - `public/avatars/` is intentionally excluded.
+
+
+## Final exit-dialog fix
+- Bottom-tab switching no longer creates browser-history entries.
+- A single persistent history sentinel handles Android Back.
+- Settings/Inbox/Chat Back returns to Home without the exit dialog.
+- Home Back alone opens the close-app dialog.
