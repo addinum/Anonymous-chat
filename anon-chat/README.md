@@ -84,17 +84,9 @@ The private VAPID key must stay in Render environment variables and must not be 
 - `public/avatars/` is intentionally excluded from this ZIP.
 
 
-## Android back-button behavior
-- Back from Settings, Inbox, or an active inner screen returns to Home.
-- Back from Home opens the Wavelength-styled close confirmation dialog.
-- No keeps the user on Home.
-- Yes attempts to close the browser window/tab when the browser permits it.
-- Android Chrome does not allow ordinary web pages to forcibly close a user-opened tab; this is a browser security restriction.
-
-
-## Corrected Back-button behavior
-- Back from Home only: opens the in-app close confirmation.
-- Back from Settings: returns directly to Home, no dialog.
-- Back from Inbox: returns directly to Home, no dialog.
-- Back from a contact thread/live chat: returns directly to Home, no dialog.
-- The close dialog is never shown from Settings, Inbox, or Chat.
+## Functional back-button fix
+- Restored the navigation helpers required by Inbox and bottom-tab buttons.
+- Settings, Inbox, contact threads, and stranger chat return to Home on phone Back.
+- Only Home shows the close-app dialog.
+- Existing tab navigation and chat controls are preserved.
+- `public/avatars/` is intentionally excluded.
