@@ -5,11 +5,60 @@
 const http = require('http');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
+const { sendPush, vapidPublicKey } = require('./push');
 const WebSocket = require('ws');
 const db = require('./db');
 
 const PORT = process.env.PORT || 3000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
+
+const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || '';
+let VAPID_PUBLIC_KEY = '';
+if (/^[A-Za-z0-9_-]{43}$/.test(VAPID_PRIVATE_KEY)) {
+  try {
+    VAPID_PUBLIC_KEY = vapidPublicKey(VAPID_PRIVATE_KEY);
+  } catch (err) {
+    console.error('Invalid VAPID_PRIVATE_KEY:', err.message);
+  }
+} else {
+  console.warn('VAPID_PRIVATE_KEY is missing/invalid. Push notifications are disabled until a stable 32-byte base64url VAPID private key is configured in Render.');
+}
+
+async function pushInboxNotification(toId, fromId, payload) {
+  // Do not notify while the recipient is actively viewing this exact thread.
+  if (activeThreads.get(toId) === fromId) return;
+  const subscriptions = await db.getPushSubscriptions(toId);
+  if (!subscriptions.length) {
+    console.log('Push skipped: no subscription for', toId);
+    return;
+  }
+  const notification = {
+    senderName: await db.getContactName(toId, fromId),
+    message: String(payload.preview || 'New message').slice(0, 180),
+    chatId: fromId,
+  };
+  await Promise.all(subscriptions.map(async row => {
+    try {
+      const result = await sendPush(row.subscription, notification, VAPID_PRIVATE_KEY);
+      console.log('Push sent:', result.statusCode, 'to', toId);
+    } catch (err) {
+      console.error('Push notification failed:', err.statusCode || '', err.body || '', err.message);
+      if ([404, 410].includes(err.statusCode)) await db.removePushSubscription(row.endpoint);
+    }
+  }));
+}
+
+function notificationPreview(msgType, msg) {
+  if (msgType === 'text') return String(msg.text || '').slice(0, 140);
+  if (msgType === 'gif') return 'Sent you a GIF';
+  if (msgType === 'voice') return 'Sent you a voice message';
+  if (msgType === 'file') {
+    const name = String(msg.fileName || '').slice(0, 90);
+    return name ? `Sent you a file: ${name}` : 'Sent you a file';
+  }
+  return 'Sent you a message';
+}
 
 // ---- Simple static file server for the frontend ----
 const MIME = {
@@ -23,6 +72,41 @@ const MIME = {
 };
 
 const server = http.createServer((req, res) => {
+  if (req.method === 'GET' && new URL(req.url, `http://${req.headers.host || 'localhost'}`).pathname === '/api/push/status') {
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+    return res.end(JSON.stringify({
+      configured: !!VAPID_PRIVATE_KEY && !!VAPID_PUBLIC_KEY,
+      publicKey: VAPID_PUBLIC_KEY,
+      pushReady: !!VAPID_PRIVATE_KEY && !!VAPID_PUBLIC_KEY
+    }));
+  }
+  if (req.method === 'GET' && new URL(req.url, `http://${req.headers.host || 'localhost'}`).pathname === '/api/push/public-key') {
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+    return res.end(JSON.stringify({ publicKey: VAPID_PUBLIC_KEY }));
+  }
+  if (req.method === 'POST' && new URL(req.url, `http://${req.headers.host || 'localhost'}`).pathname === '/api/push/subscribe') {
+    if (!VAPID_PRIVATE_KEY || !VAPID_PUBLIC_KEY) {
+      res.writeHead(503, { 'Content-Type': 'application/json' });
+      return res.end(JSON.stringify({ ok: false, error: 'Push notifications are not configured on the server. Add VAPID_PRIVATE_KEY in Render.' }));
+    }
+    let body = '';
+    req.on('data', chunk => { body += chunk; if (body.length > 50000) req.destroy(); });
+    req.on('end', async () => {
+      try {
+        const data = JSON.parse(body || '{}');
+        const deviceId = String(data.deviceId || '').slice(0, 128);
+        const subscription = data.subscription || data;
+        if (!deviceId || !subscription.endpoint || !subscription.keys?.p256dh || !subscription.keys?.auth) throw new Error('Invalid subscription');
+        const ok = await db.savePushSubscription(deviceId, subscription);
+        res.writeHead(ok ? 201 : 503, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok }));
+      } catch (err) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: 'Invalid push subscription' }));
+      }
+    });
+    return;
+  }
   // Strip query strings (e.g. style.css?v=...) before resolving static files.
   // This keeps cache-busting URLs from causing a 404 and taking down the UI styling.
   const requestPath = new URL(req.url, `http://${req.headers.host || 'localhost'}`).pathname;
@@ -55,6 +139,7 @@ const avatars = new Map();   // ws -> chosen avatar id (e.g. 'a1'..'a10')
 const codeWaiting = new Map(); // friend code -> ws waiting to be joined
 const deviceOnline = new Map(); // deviceId -> ws (for inbox delivery)
 const wsDeviceId = new Map();   // ws -> deviceId (reverse lookup)
+const activeThreads = new Map(); // deviceId -> contactId currently open
 
 function send(ws, type, payload = {}) {
   if (ws.readyState === WebSocket.OPEN) {
@@ -340,6 +425,7 @@ wss.on('connection', (ws) => {
         const myId = wsDeviceId.get(ws);
         const theirId = String(msg.contactId || '');
         if (!myId || !theirId) break;
+        activeThreads.set(myId, theirId);
         db.markThreadRead(theirId, myId).then(async () => {
           const page = await db.getThreadPage(myId, theirId, 30);
           send(ws, 'thread_history', { contactId: theirId, ...page });
@@ -347,6 +433,12 @@ wss.on('connection', (ws) => {
           const theirWs = deviceOnline.get(theirId);
           if (theirWs) send(theirWs, 'read_receipt', { byId: myId, contactId: myId });
         });
+        break;
+      }
+
+      case 'close_thread': {
+        const myId = wsDeviceId.get(ws);
+        if (myId) activeThreads.delete(myId);
         break;
       }
 
@@ -366,6 +458,32 @@ wss.on('connection', (ws) => {
         if (!myId || !toId) break;
         const recipientWs = deviceOnline.get(toId);
         if (recipientWs) send(recipientWs, 'inbox_typing', { fromId: myId });
+        break;
+      }
+
+      case 'test_push': {
+        const myId = wsDeviceId.get(ws);
+        if (!myId) { send(ws, 'push_test_result', { ok: false, error: 'Device is not identified yet.' }); break; }
+        const subscriptions = await db.getPushSubscriptions(myId);
+        if (!subscriptions.length) {
+          send(ws, 'push_test_result', { ok: false, error: 'No push subscription saved for this phone. Enable notifications first.' });
+          break;
+        }
+        let sent = 0;
+        for (const row of subscriptions) {
+          try {
+            const result = await sendPush(row.subscription, {
+              senderName: 'Wavelength',
+              message: 'Test notification — push notifications are working! 🔔',
+              chatId: ''
+            }, VAPID_PRIVATE_KEY);
+            if (result.statusCode >= 200 && result.statusCode < 300) sent++;
+          } catch (err) {
+            console.error('Test push failed:', err.statusCode || '', err.body || '', err.message);
+            if ([404, 410].includes(err.statusCode)) await db.removePushSubscription(row.endpoint);
+          }
+        }
+        send(ws, 'push_test_result', sent ? { ok: true } : { ok: false, error: 'Push service rejected the subscription. Check Render logs.' });
         break;
       }
 
@@ -394,6 +512,7 @@ wss.on('connection', (ws) => {
             send(recipientWs, 'inbox_message', payload);
             send(ws, 'message_status', { id, status: 'delivered' });
           }
+          await pushInboxNotification(toId, myId, { preview: notificationPreview('text', { text }) });
         });
         break;
       }
@@ -514,6 +633,7 @@ wss.on('connection', (ws) => {
           send(ws, 'inbox_message', payload);
           const recipientWs = deviceOnline.get(toId);
           if (recipientWs) { if (saved) await db.markMessageDelivered(payload.id); payload.delivered = true; send(recipientWs, 'inbox_message', payload); send(ws, 'message_status', { id: payload.id, status: 'delivered' }); }
+          await pushInboxNotification(toId, myId, { preview: notificationPreview('gif', {}) });
         });
         break;
       }
@@ -566,6 +686,7 @@ wss.on('connection', (ws) => {
             send(recipientWs, 'inbox_message', payload);
             send(ws, 'message_status', { id: payload.id, status: 'delivered' });
           }
+          await pushInboxNotification(toId, myId, { preview: notificationPreview('file', { fileName }) });
         });
         break;
       }
@@ -600,6 +721,7 @@ wss.on('connection', (ws) => {
           send(ws, 'inbox_message', payload);
           const recipientWs = deviceOnline.get(toId);
           if (recipientWs) { if (saved) await db.markMessageDelivered(payload.id); payload.delivered = true; send(recipientWs, 'inbox_message', payload); send(ws, 'message_status', { id: payload.id, status: 'delivered' }); }
+          await pushInboxNotification(toId, myId, { preview: notificationPreview('voice', {}) });
         });
         break;
       }
@@ -613,6 +735,7 @@ wss.on('connection', (ws) => {
     names.delete(ws);
     avatars.delete(ws);
     const deviceId = wsDeviceId.get(ws);
+    if (deviceId) activeThreads.delete(deviceId);
     if (deviceId && deviceOnline.get(deviceId) === ws) {
       deviceOnline.delete(deviceId);
       db.touchContactLastSeen(deviceId).catch(() => {});

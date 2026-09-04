@@ -4,6 +4,7 @@
     searching: document.getElementById('searching'),
     chat: document.getElementById('chat'),
     inbox: document.getElementById('inbox'),
+    settings: document.getElementById('settings'),
     thread: document.getElementById('thread'),
   };
 
@@ -29,6 +30,18 @@
   const contactsSection = document.getElementById('contactsSection');
   const accountBar = document.getElementById('accountBar');
   const accountBarText = document.getElementById('accountBarText');
+  const settingsAccountBtn = document.getElementById('settingsAccountBtn');
+  const settingsAccountAction = document.getElementById('settingsAccountAction');
+  const settingsSignOutBtn = document.getElementById('settingsSignOutBtn');
+  const settingsAccountText = document.getElementById('settingsAccountText');
+  const settingsProfileName = document.getElementById('settingsProfileName');
+  const settingsProfileAccount = document.getElementById('settingsProfileAccount');
+  const settingsAvatarPreview = document.getElementById('settingsAvatarPreview');
+  const saveProfileBtn = document.getElementById('saveProfileBtn');
+  const profileSaveStatus = document.getElementById('profileSaveStatus');
+  const settingsDarkModeToggle = document.getElementById('settingsDarkModeToggle');
+  const bottomNav = document.getElementById('bottomNav');
+  const bottomInboxBadge = document.getElementById('bottomInboxBadge');
   const accountModal = document.getElementById('accountModal');
   const accountModalClose = document.getElementById('accountModalClose');
   const authTabsView = document.getElementById('authTabsView');
@@ -93,6 +106,11 @@
   const callBtn = document.getElementById('callBtn');
   const fileBtn = document.getElementById('fileBtn');
   const fileInput = document.getElementById('fileInput');
+  const fileViewerModal = document.getElementById('fileViewerModal');
+  const fileViewerClose = document.getElementById('fileViewerClose');
+  const fileViewerTitle = document.getElementById('fileViewerTitle');
+  const fileViewerMeta = document.getElementById('fileViewerMeta');
+  const fileViewerBody = document.getElementById('fileViewerBody');
   const incomingCallModal = document.getElementById('incomingCallModal');
   const incomingCallAvatar = document.getElementById('incomingCallAvatar');
   const incomingCallName = document.getElementById('incomingCallName');
@@ -120,6 +138,7 @@
   let reconnectAttempts = 0;
   let userInitiatedClose = false;
   let currentThreadContactId = null;
+  let pendingNotificationChatId = null;
   let threadOldestId = null;
   let threadHasMore = false;
   let loadingOlderThread = false;
@@ -177,11 +196,33 @@
 
   // ---------- Account (optional email login on top of the anonymous system) ----------
   function updateAccountBarDisplay() {
-    if (myAccountEmail) {
-      accountBarText.textContent = `👤 Signed in as ${myAccountEmail}`;
-    } else {
-      accountBarText.textContent = '🔐 Sign in to keep your inbox everywhere';
+    if (accountBarText) {
+      accountBarText.textContent = myAccountEmail
+        ? `👤 Signed in as ${myAccountEmail}`
+        : '🔐 Sign in to keep your inbox everywhere';
     }
+  }
+
+  function updateSettingsAccountUI() {
+    if (!settingsAccountText) return;
+    if (myAccountEmail) {
+      settingsAccountText.textContent = `Signed in as ${myAccountEmail}. Your inbox can follow your account across devices.`;
+      if (settingsAccountAction) settingsAccountAction.textContent = '✎ Manage account';
+      if (settingsSignOutBtn) settingsSignOutBtn.classList.remove('hidden');
+      if (settingsProfileAccount) settingsProfileAccount.textContent = myAccountEmail;
+    } else {
+      settingsAccountText.textContent = 'You are using Wavelength anonymously on this device.';
+      if (settingsAccountAction) settingsAccountAction.textContent = '🔐 Sign in / Create account';
+      if (settingsSignOutBtn) settingsSignOutBtn.classList.add('hidden');
+      if (settingsProfileAccount) settingsProfileAccount.textContent = 'Anonymous account';
+    }
+  }
+
+  function refreshSettingsProfile() {
+    const name = nameInput ? nameInput.value.trim() : '';
+    if (settingsProfileName) settingsProfileName.textContent = name || 'Stranger';
+    if (settingsAvatarPreview) renderAvatarInto(settingsAvatarPreview, getMyAvatarId());
+    updateSettingsAccountUI();
   }
 
   function showAccountModal() {
@@ -207,7 +248,9 @@
     accountModal.classList.add('hidden');
   }
 
-  accountBar.addEventListener('click', showAccountModal);
+  if (accountBar) accountBar.addEventListener('click', showAccountModal);
+  if (settingsAccountBtn) settingsAccountBtn.addEventListener('click', showAccountModal);
+  if (settingsAccountAction) settingsAccountAction.addEventListener('click', showAccountModal);
   accountModalClose.addEventListener('click', hideAccountModal);
   accountModal.addEventListener('click', (e) => {
     if (e.target === accountModal) hideAccountModal();
@@ -257,13 +300,27 @@
     myAccountEmail = null;
     localStorage.removeItem('wavelength_account_email');
     updateAccountBarDisplay();
+    updateSettingsAccountUI();
     hideAccountModal();
+  });
+
+  if (settingsSignOutBtn) settingsSignOutBtn.addEventListener('click', () => signOutBtn.click());
+
+  if (saveProfileBtn) saveProfileBtn.addEventListener('click', () => {
+    const name = nameInput.value.trim();
+    if (name) sendWs('set_name', { name });
+    sendWs('set_avatar', { avatarId: getMyAvatarId() });
+    profileSaveStatus.textContent = '✓ Profile saved';
+    refreshSettingsProfile();
+    setTimeout(() => { if (profileSaveStatus) profileSaveStatus.textContent = ''; }, 2200);
   });
 
   function handleAuthSuccess(msg) {
     myAccountEmail = msg.email;
     localStorage.setItem('wavelength_account_email', msg.email);
     updateAccountBarDisplay();
+    updateSettingsAccountUI();
+    refreshSettingsProfile();
 
     if (msg.deviceId && msg.deviceId !== myDeviceId) {
       // Logging in from a different browser/incognito: switch to the
@@ -274,6 +331,11 @@
       const name = nameInput.value.trim();
       if (name) sendWs('set_name', { name });
       sendWs('set_avatar', { avatarId: getMyAvatarId() });
+      // The account may own a different canonical deviceId. Re-bind the
+      // browser's push subscription to that device after the switch.
+      if (Notification.permission === 'granted') {
+        setTimeout(() => ensurePushSubscription(), 250);
+      }
     }
 
     hideAccountModal();
@@ -365,6 +427,7 @@
     localStorage.setItem(AVATAR_ID_KEY, id);
     sendWs('set_avatar', { avatarId: id });
     renderAvatarPicker();
+    refreshSettingsProfile();
   }
 
   function renderAvatarPicker() {
@@ -412,7 +475,14 @@
   // ---------- Screen switching ----------
   function showScreen(name) {
     Object.values(screens).forEach((s) => s.classList.add('hidden'));
-    screens[name].classList.remove('hidden');
+    if (screens[name]) screens[name].classList.remove('hidden');
+    if (bottomNav) {
+      const visibleTab = ['landing', 'inbox', 'settings'].includes(name);
+      bottomNav.classList.toggle('hidden', !visibleTab);
+      bottomNav.querySelectorAll('.bottom-nav__item').forEach((item) => {
+        item.classList.toggle('bottom-nav__item--active', item.dataset.tab === name);
+      });
+    }
   }
 
   function randomFreq() {
@@ -452,6 +522,7 @@
     if (!screens.thread.classList.contains('hidden')) {
       // Thread -> Inbox, no confirmation needed.
       if (mediaRecorder && mediaRecorder.state === 'recording') stopRecording(false);
+      sendWs('close_thread');
       currentThreadContactId = null;
       showScreen('inbox');
       sendWs('get_contacts');
@@ -505,17 +576,152 @@
     }
   }
 
-  function notifyInboxMessage(name) {
+  function notifyInboxMessage(name, preview = 'New message') {
+    // OS-level notifications are delivered by the service worker/Web Push.
+    // Keep this local helper for the in-app sound only, avoiding duplicate notifications.
     playBeep();
-    if ('Notification' in window && Notification.permission === 'granted' && document.hidden) {
-      new Notification('Wavelength', { body: `New message from ${name}` });
+  }
+
+  let pushRegistration = null;
+  
+
+  function urlBase64ToUint8Array(base64String) {
+    const padding = '='.repeat((4 - base64String.length % 4) % 4);
+    const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+    const rawData = atob(base64);
+    return Uint8Array.from([...rawData].map(ch => ch.charCodeAt(0)));
+  }
+
+  async function ensurePushSubscription(forceResubscribe = false) {
+    if (!('serviceWorker' in navigator) || !('PushManager' in window) || !('Notification' in window)) {
+      return { ok:false, error:'This browser does not support Web Push.' };
+    }
+    try {
+      pushRegistration = pushRegistration || await navigator.serviceWorker.register('/sw.js');
+      if (Notification.permission !== 'granted') {
+        return { ok:false, error:'Notification permission is not granted.' };
+      }
+
+      const keyRes = await fetch('/api/push/public-key', { cache: 'no-store' });
+      if (!keyRes.ok) return { ok:false, error:'Server did not provide a VAPID public key.' };
+      const { publicKey } = await keyRes.json();
+      if (!publicKey) return { ok:false, error:'VAPID public key is empty.' };
+
+      const keyStorage = 'wavelength_vapid_public_key';
+      const previousKey = localStorage.getItem(keyStorage);
+      let subscription = await pushRegistration.pushManager.getSubscription();
+
+      // A PushSubscription is cryptographically tied to the VAPID/application
+      // server key. After changing notification implementations or restarting
+      // a server with a different key, the old subscription must be replaced.
+      if (subscription && (forceResubscribe || !previousKey || previousKey !== publicKey)) {
+        try { await subscription.unsubscribe(); } catch (_) {}
+        subscription = null;
+      }
+
+      if (!subscription) {
+        subscription = await pushRegistration.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: urlBase64ToUint8Array(publicKey)
+        });
+      }
+
+      const saveRes = await fetch('/api/push/subscribe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          deviceId: myDeviceId,
+          subscription: subscription.toJSON()
+        })
+      });
+      const saveData = await saveRes.json().catch(() => ({}));
+
+      if (!saveRes.ok || !saveData.ok) {
+        return { ok:false, error:saveData.error || 'Server could not save the push subscription.' };
+      }
+
+      localStorage.setItem(keyStorage, publicKey);
+      return { ok:true, deviceId: myDeviceId };
+    } catch (err) {
+      console.warn('Push notifications unavailable:', err);
+      return { ok:false, error:err.message || 'Push setup failed.' };
     }
   }
 
-  function requestNotificationPermission() {
-    if ('Notification' in window && Notification.permission === 'default') {
-      Notification.requestPermission().catch(() => {});
+  async function resetPushSubscription() {
+    try {
+      if (!('serviceWorker' in navigator)) return { ok:false, error:'Service workers are not supported.' };
+      pushRegistration = pushRegistration || await navigator.serviceWorker.register('/sw.js');
+      const old = await pushRegistration.pushManager.getSubscription();
+      if (old) {
+        try { await old.unsubscribe(); } catch (_) {}
+      }
+      localStorage.removeItem('wavelength_vapid_public_key');
+      return await ensurePushSubscription(true);
+    } catch (err) {
+      return { ok:false, error:err.message || 'Could not reset push subscription.' };
     }
+  }
+
+  async function testPhonePush() {
+    let result = await ensurePushSubscription();
+    if (!result?.ok) return result || { ok:false, error:'Push setup failed.' };
+    sendWs('test_push');
+    return { ok:true, waitingForServer:true };
+  }
+
+  window.wavelengthResetPushSubscription = resetPushSubscription;
+
+  async function requestNotificationPermission() {
+    if (!('Notification' in window)) return false;
+    if (Notification.permission === 'granted') {
+      await ensurePushSubscription();
+      return true;
+    }
+    if (Notification.permission === 'default') {
+      try {
+        const permission = await Notification.requestPermission();
+        if (permission === 'granted') {
+          await ensurePushSubscription();
+          return true;
+        }
+      } catch (_) {}
+    }
+    return Notification.permission === 'granted';
+  }
+
+  window.wavelengthRequestNotificationPermission = requestNotificationPermission;
+  window.wavelengthTestPhonePush = testPhonePush;
+
+  const enablePushBtn = document.getElementById('enablePushBtn');
+  const testPushBtn = document.getElementById('testPushBtn');
+  const pushStatus = document.getElementById('pushStatus');
+  if (enablePushBtn) enablePushBtn.addEventListener('click', async () => {
+    if (pushStatus) pushStatus.textContent = 'Requesting notification permission…';
+    const result = await requestNotificationPermission();
+    if (pushStatus) pushStatus.textContent = result
+      ? '✓ Phone notifications are enabled.'
+      : 'Permission/setup failed. Check Chrome notification settings.';
+  });
+  if (testPushBtn) testPushBtn.addEventListener('click', async () => {
+    if (pushStatus) pushStatus.textContent = 'Sending test notification…';
+    const result = await testPhonePush();
+    if (pushStatus && !result?.ok) pushStatus.textContent = '✕ ' + (result.error || 'Push setup failed.');
+    else if (pushStatus) pushStatus.textContent = '✓ Test sent. Check your phone.';
+  });
+
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.register('/sw.js').then(reg => {
+      pushRegistration = reg;
+      if ('Notification' in window && Notification.permission === 'granted') ensurePushSubscription();
+    }).catch(() => {});
+    navigator.serviceWorker.addEventListener('message', event => {
+      if (event.data?.type === 'OPEN_CHAT' && event.data.chatId) {
+        const c = latestContacts.find(x => x.contactId === event.data.chatId);
+        if (c) openThread(c.contactId, c.name, c.avatar);
+        else { pendingNotificationChatId = event.data.chatId; sendWs('get_contacts'); }
+      }
+    });
   }
 
   // ---------- WebSocket (single persistent connection for the whole app) ----------
@@ -565,6 +771,15 @@
 
   function handleServerMessage(msg) {
     switch (msg.type) {
+      case 'push_test_result':
+        if (msg.ok) {
+          console.log('Push test accepted by server.');
+        } else {
+          console.warn('Push test failed:', msg.error || 'Unknown error');
+          alert('Push test failed: ' + (msg.error || 'Unknown error'));
+        }
+        break;
+
       case 'online_count':
         onlineCount.textContent = `${msg.count} ${msg.count === 1 ? 'person' : 'people'} online now`;
         break;
@@ -574,6 +789,8 @@
           myAccountEmail = msg.account.email;
           localStorage.setItem('wavelength_account_email', myAccountEmail);
           updateAccountBarDisplay();
+          updateSettingsAccountUI();
+          refreshSettingsProfile();
         }
         break;
 
@@ -596,6 +813,7 @@
         myAccountEmail = msg.email;
         localStorage.setItem('wavelength_account_email', myAccountEmail);
         updateAccountBarDisplay();
+        updateSettingsAccountUI();
         editSuccess.textContent = 'Saved!';
         editSuccess.classList.remove('hidden');
         editCurrentPassword.value = '';
@@ -665,12 +883,17 @@
         latestContacts.forEach(c => presenceById.set(c.contactId, { online: !!c.online, lastSeenAt: c.lastSeenAt }));
         renderInboxList();
         updateInboxBadge();
+        if (pendingNotificationChatId) {
+          const c = latestContacts.find(x => x.contactId === pendingNotificationChatId);
+          if (c) { pendingNotificationChatId = null; openThread(c.contactId, c.name, c.avatar); }
+        }
         break;
 
       case 'contact_deleted':
         if (msg.ok) {
           latestContacts = latestContacts.filter((c) => c.contactId !== msg.contactId);
           if (currentThreadContactId === msg.contactId) {
+            sendWs('close_thread');
             currentThreadContactId = null;
             showScreen('inbox');
           }
@@ -733,7 +956,12 @@
           }
         } else if (isForMe) {
           const contact = latestContacts.find((c) => c.contactId === otherPartyId);
-          notifyInboxMessage(contact ? contact.name : 'a contact');
+          const contactName = contact ? contact.name : 'a contact';
+          const preview = msg.msgType === 'text' ? (msg.text || 'New message') :
+            msg.msgType === 'gif' ? 'Sent you a GIF' :
+            msg.msgType === 'voice' ? 'Sent you a voice message' :
+            msg.msgType === 'file' ? `Sent you a file: ${msg.fileName || 'File'}` : 'New message';
+          notifyInboxMessage(contactName, preview);
         }
         sendWs('get_contacts'); // refresh unread counts / previews
         break;
@@ -889,8 +1117,8 @@
     if (threadRenderTarget === threadLog) threadLog.scrollTop = threadLog.scrollHeight;
   }
 
-  // Generic file/document bubble. Any browser-readable file type can be selected;
-  // images get an inline preview, while PDFs and other formats get a clean file card.
+  // File bubble: files never get a download link. Clicking Open launches the
+  // in-app viewer for browser-previewable formats (image/video/audio/PDF/text).
   function addFileBubble(fileMeta, who) {
     const data = String(fileMeta?.fileData || '');
     if (!/^data:[^;,]+;base64,[A-Za-z0-9+/=]+$/i.test(data)) return;
@@ -910,6 +1138,9 @@
     const name = String(fileMeta.fileName || 'File').slice(0, 180);
     const size = formatFileSize(fileMeta.fileSize);
     const isImage = mime.startsWith('image/');
+    const isVideo = mime.startsWith('video/');
+    const isAudio = mime.startsWith('audio/');
+    const isPdf = mime === 'application/pdf';
 
     if (isImage) {
       const img = document.createElement('img');
@@ -918,15 +1149,20 @@
       img.alt = name;
       img.loading = 'lazy';
       img.decoding = 'async';
+      img.addEventListener('click', () => openInAppFileViewer(fileMeta));
+      img.title = 'Open in viewer';
       bubble.appendChild(img);
     }
 
-    const card = document.createElement('div');
-    card.className = 'wa-file-card';
+    const card = document.createElement('button');
+    card.type = 'button';
+    card.className = 'wa-file-card wa-file-card--button';
+    card.setAttribute('aria-label', `Open ${name} in viewer`);
+    card.addEventListener('click', () => openInAppFileViewer(fileMeta));
 
     const icon = document.createElement('div');
     icon.className = 'wa-file-icon';
-    icon.textContent = mime === 'application/pdf' ? '📄' : isImage ? '🖼️' : '📎';
+    icon.textContent = isPdf ? '📄' : isImage ? '🖼️' : isVideo ? '🎬' : isAudio ? '🎵' : '📎';
 
     const info = document.createElement('div');
     info.className = 'wa-file-info';
@@ -935,17 +1171,14 @@
     title.textContent = name;
     const details = document.createElement('div');
     details.className = 'wa-file-meta';
-    details.textContent = `${mime === 'application/pdf' ? 'PDF' : (mime.split('/')[1] || 'FILE').toUpperCase()} • ${size}`;
+    details.textContent = `${isPdf ? 'PDF' : isImage ? 'IMAGE' : isVideo ? 'VIDEO' : isAudio ? 'AUDIO' : (mime.split('/')[1] || 'FILE').toUpperCase()} • ${size} • Tap to view`;
     info.appendChild(title);
     info.appendChild(details);
 
-    const open = document.createElement('a');
+    const open = document.createElement('span');
     open.className = 'wa-file-open';
-    open.href = data;
-    open.target = '_blank';
-    open.rel = 'noopener noreferrer';
-    open.download = name;
-    open.textContent = 'Open';
+    open.textContent = 'View';
+    open.setAttribute('aria-hidden', 'true');
 
     card.appendChild(icon);
     card.appendChild(info);
@@ -960,6 +1193,103 @@
     row.appendChild(bubble);
     threadRenderTarget.appendChild(row);
     if (threadRenderTarget === threadLog) threadLog.scrollTop = threadLog.scrollHeight;
+  }
+
+  function base64DataUrlToBlob(dataUrl) {
+    const comma = dataUrl.indexOf(',');
+    if (comma < 0) throw new Error('Invalid file data');
+    const header = dataUrl.slice(0, comma);
+    const base64 = dataUrl.slice(comma + 1);
+    const mime = (header.match(/^data:([^;]+)/i) || [])[1] || 'application/octet-stream';
+    const binary = atob(base64);
+    const bytes = new Uint8Array(binary.length);
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return new Blob([bytes], { type: mime });
+  }
+
+  function openInAppFileViewer(fileMeta) {
+    const data = String(fileMeta?.fileData || '');
+    if (!/^data:[^;,]+;base64,[A-Za-z0-9+/=]+$/i.test(data)) return;
+
+    const mime = String(fileMeta.fileMimeType || 'application/octet-stream').toLowerCase();
+    const name = String(fileMeta.fileName || 'File').slice(0, 180);
+    fileViewerTitle.textContent = name;
+    fileViewerMeta.textContent = `${mime.toUpperCase()} • ${formatFileSize(fileMeta.fileSize)}`;
+    fileViewerBody.replaceChildren();
+
+    let el = null;
+    let objectUrl = null;
+    try {
+      const blob = base64DataUrlToBlob(data);
+      objectUrl = URL.createObjectURL(blob);
+
+      if (mime.startsWith('image/')) {
+        el = document.createElement('img');
+        el.className = 'file-viewer-media file-viewer-image';
+        el.src = objectUrl;
+        el.alt = name;
+      } else if (mime.startsWith('video/')) {
+        el = document.createElement('video');
+        el.className = 'file-viewer-media';
+        el.src = objectUrl;
+        el.controls = true;
+        el.playsInline = true;
+        el.preload = 'metadata';
+        el.setAttribute('controlsList', 'nodownload noremoteplayback');
+        el.disablePictureInPicture = true;
+      } else if (mime.startsWith('audio/')) {
+        el = document.createElement('audio');
+        el.className = 'file-viewer-audio';
+        el.src = objectUrl;
+        el.controls = true;
+        el.preload = 'metadata';
+        el.setAttribute('controlsList', 'nodownload noplaybackrate');
+      } else if (mime === 'application/pdf') {
+        el = document.createElement('iframe');
+        el.className = 'file-viewer-pdf';
+        el.src = objectUrl + '#toolbar=0&navpanes=0&scrollbar=1';
+        el.title = `PDF preview: ${name}`;
+      } else if (mime.startsWith('text/') || /json|xml|csv|javascript/.test(mime)) {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const pre = document.createElement('pre');
+          pre.className = 'file-viewer-text';
+          pre.textContent = String(reader.result || '');
+          fileViewerBody.replaceChildren(pre);
+        };
+        reader.readAsText(blob);
+      } else {
+        const unsupported = document.createElement('div');
+        unsupported.className = 'file-viewer-unsupported';
+        unsupported.innerHTML = '<div class="file-viewer-unsupported__icon">📎</div><strong>Preview not supported</strong><p>This file type cannot be safely rendered inside a web browser.</p><small>No download button is provided.</small>';
+        fileViewerBody.appendChild(unsupported);
+      }
+
+      if (el) fileViewerBody.appendChild(el);
+      fileViewerModal.classList.remove('hidden');
+      document.body.classList.add('file-viewer-open');
+
+      const cleanup = () => {
+        if (objectUrl) URL.revokeObjectURL(objectUrl);
+        objectUrl = null;
+      };
+      fileViewerClose._viewerCleanup = cleanup;
+    } catch (err) {
+      console.error('File viewer error:', err);
+      const error = document.createElement('div');
+      error.className = 'file-viewer-unsupported';
+      error.textContent = 'This file could not be previewed.';
+      fileViewerBody.appendChild(error);
+      fileViewerModal.classList.remove('hidden');
+    }
+  }
+
+  function closeInAppFileViewer() {
+    if (fileViewerClose?._viewerCleanup) fileViewerClose._viewerCleanup();
+    fileViewerClose._viewerCleanup = null;
+    fileViewerBody.replaceChildren();
+    fileViewerModal.classList.add('hidden');
+    document.body.classList.remove('file-viewer-open');
   }
 
   function formatFileSize(bytes) {
@@ -1250,11 +1580,13 @@
   // ---------- Inbox rendering ----------
   function updateInboxBadge() {
     const totalUnread = latestContacts.reduce((sum, c) => sum + (c.unreadCount || 0), 0);
-    if (totalUnread > 0) {
-      inboxBadge.textContent = totalUnread > 99 ? '99+' : totalUnread;
-      inboxBadge.classList.remove('hidden');
-    } else {
-      inboxBadge.classList.add('hidden');
+    if (inboxBadge) {
+      inboxBadge.textContent = totalUnread > 99 ? '99+' : String(totalUnread);
+      inboxBadge.classList.toggle('hidden', totalUnread === 0);
+    }
+    if (bottomInboxBadge) {
+      bottomInboxBadge.textContent = totalUnread > 99 ? '99+' : String(totalUnread);
+      bottomInboxBadge.classList.toggle('hidden', totalUnread === 0);
     }
   }
 
@@ -1828,10 +2160,25 @@
   });
 
   // ---------- Inbox / Thread navigation ----------
-  inboxBtn.addEventListener('click', () => {
+  if (inboxBtn) inboxBtn.addEventListener('click', () => {
     showScreen('inbox');
     pushNavState('inbox');
     sendWs('get_contacts');
+  });
+
+  if (bottomNav) bottomNav.querySelectorAll('.bottom-nav__item').forEach((item) => {
+    item.addEventListener('click', () => {
+      const tab = item.dataset.tab;
+      if (tab === 'landing') {
+        showScreen('landing');
+      } else if (tab === 'inbox') {
+        showScreen('inbox');
+        sendWs('get_contacts');
+      } else if (tab === 'settings') {
+        refreshSettingsProfile();
+        showScreen('settings');
+      }
+    });
   });
 
   // On-screen back buttons just trigger a real browser "back" — the
@@ -1969,6 +2316,17 @@
     reader.onerror = () => addSystemBubble('Could not read that file.');
     reader.readAsDataURL(file);
   }
+
+  fileViewerClose?.addEventListener('click', closeInAppFileViewer);
+  fileViewerModal?.addEventListener('click', (e) => { if (e.target === fileViewerModal) closeInAppFileViewer(); });
+
+  // Discourage casual saving/copying from the viewer. This cannot prevent screenshots.
+  fileViewerModal?.addEventListener('contextmenu', (e) => e.preventDefault());
+  document.addEventListener('keydown', (e) => {
+    if (!fileViewerModal || fileViewerModal.classList.contains('hidden')) return;
+    if (e.key === 'Escape') closeInAppFileViewer();
+    if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === 's' || e.key.toLowerCase() === 'u')) e.preventDefault();
+  });
 
   // ---------- GIPHY GIF picker ----------
   function openGifPicker() {
@@ -2191,8 +2549,19 @@
   }
   window.addEventListener('resize', setAppHeight);
 
+  // ---------- Settings theme button ----------
+  if (settingsDarkModeToggle) settingsDarkModeToggle.addEventListener('click', () => {
+    const dark = !document.documentElement.classList.contains('wl-dark');
+    localStorage.setItem('wavelength-theme', dark ? 'dark' : 'light');
+    document.documentElement.classList.toggle('wl-dark', dark);
+    document.body.classList.toggle('wl-dark', dark);
+    settingsDarkModeToggle.textContent = dark ? '☀️ Light Mode' : '🌙 Dark Mode';
+  });
+
   // ---------- Boot ----------
   renderAvatarPicker();
+  refreshSettingsProfile();
+  updateSettingsAccountUI();
   updateAccountBarDisplay();
   connectSocket();
 })();
