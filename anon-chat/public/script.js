@@ -491,14 +491,40 @@
   setInterval(() => { dialFreq.textContent = randomFreq(); }, 900);
 
   // ---------- Android / browser Back button ----------
-  // App navigation uses one browser-history guard:
-  //   Home -> Android Back => Wavelength exit dialog
-  //   Any other screen -> Android Back => Home
-  // The Yes button intentionally navigates to Google instead of trying to
-  // force-close the Chrome tab (Chrome blocks normal web pages from doing so).
+  // App navigation uses one persistent browser-history guard:
+  //   Inner screen + Back -> Home
+  //   Home + Back -> Wavelength exit dialog
+  // The dialog's Yes button navigates to Google's homepage. It never
+  // attempts to force-close a normal Chrome tab.
   let wavelengthBackReady = false;
   let wavelengthCloseDialog = null;
   let wavelengthBackBusy = false;
+
+  function pushNavState(screenName) {
+    if (!wavelengthBackReady) return;
+    history.replaceState({ wavelengthScreen: screenName, wavelengthApp: true }, '', location.href);
+    ensureWavelengthBackGuard();
+  }
+
+  function pushChatHistoryState() {
+    if (!chatHistoryPushed) {
+      history.pushState({ wavelengthScreen: 'chat', wavelengthApp: true }, '', location.href);
+      chatHistoryPushed = true;
+    }
+  }
+
+  function exitChatToLanding() {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      try { ws.send(JSON.stringify({ type: 'leave' })); } catch (_) {}
+    }
+    emojiPanel.classList.add('hidden');
+    showScreen('landing');
+    refreshInboxBadge();
+    if (wavelengthBackReady) {
+      history.replaceState({ wavelengthScreen: 'landing', wavelengthApp: true }, '', location.href);
+      ensureWavelengthBackGuard();
+    }
+  }
 
   function isHomeScreen() {
     return !!(screens.landing && !screens.landing.classList.contains('hidden'));
@@ -534,8 +560,8 @@
       if (event.target === overlay) hide();
     });
     overlay.querySelector('.wavelength-close-yes').addEventListener('click', () => {
-      // A normal Chrome tab cannot be force-closed by page JavaScript.
-      // Go to Google's homepage instead, as requested.
+      // A normal user-opened Chrome tab cannot be force-closed by a website.
+      // Navigate to Chrome's Google homepage instead, as requested.
       window.location.assign('https://www.google.com/');
     });
 
@@ -551,9 +577,7 @@
 
   function ensureWavelengthBackGuard() {
     if (!wavelengthBackReady) return;
-    // The last history entry is always our guard. It has the same URL,
-    // so pressing Android Back triggers popstate without leaving the site.
-    if (!history.state || history.state.wavelengthGuard !== true) {
+    if (!history.state || !history.state.wavelengthGuard) {
       history.pushState({ wavelengthGuard: true, wavelengthApp: true }, '', location.href);
     }
   }
@@ -562,37 +586,22 @@
     if (wavelengthBackReady) return;
     wavelengthBackReady = true;
 
-    // Preserve the current page as the app's Home boundary, then add one
-    // guard entry above it. Do not create a chain for tabs.
+    // Replace the current page entry with Home, then put one guard entry
+    // above it. Android Chrome Back will therefore fire popstate instead of
+    // immediately leaving the page.
     history.replaceState({ wavelengthScreen: 'landing', wavelengthApp: true }, '', location.href);
     history.pushState({ wavelengthGuard: true, wavelengthApp: true }, '', location.href);
-  }
-
-  function pushChatHistoryState() {
-    if (!chatHistoryPushed) {
-      history.pushState({ wavelengthScreen: 'chat', wavelengthApp: true }, '', location.href);
-      chatHistoryPushed = true;
-    }
-  }
-
-  // Called by the existing tab navigation. It must never add a browser
-  // history entry, because tabs are internal app navigation.
-  function pushNavState(screenName) {
-    history.replaceState({ wavelengthScreen: screenName, wavelengthApp: true }, '', location.href);
-    ensureWavelengthBackGuard();
   }
 
   window.addEventListener('popstate', () => {
     if (!wavelengthBackReady || wavelengthBackBusy) return;
     wavelengthBackBusy = true;
 
-    if (isHomeScreen()) {
-      // Home -> show the exit dialog. Put the guard back immediately so a
-      // second Back press cannot escape the page while the dialog is open.
-      ensureWavelengthBackGuard();
-      showCloseDialog();
-    } else {
-      // Any inner screen -> Home. Never show the exit dialog here.
+    // Decide from the actual visible screen, not from history.state. This
+    // makes the behavior reliable even when chat/thread entries exist.
+    const wasHome = isHomeScreen();
+
+    if (!wasHome) {
       if (screens.chat && !screens.chat.classList.contains('hidden')) {
         chatHistoryPushed = false;
         if (ws && ws.readyState === WebSocket.OPEN) {
@@ -614,17 +623,22 @@
 
       showScreen('landing');
       refreshInboxBadge();
+      history.replaceState({ wavelengthScreen: 'landing', wavelengthApp: true }, '', location.href);
       ensureWavelengthBackGuard();
+    } else {
+      // Home is the only place where Android Back opens the Wavelength dialog.
+      ensureWavelengthBackGuard();
+      showCloseDialog();
     }
 
     setTimeout(() => { wavelengthBackBusy = false; }, 120);
   });
 
   document.addEventListener('DOMContentLoaded', () => {
-    setTimeout(prepareWavelengthBackGuard, 100);
+    setTimeout(prepareWavelengthBackGuard, 150);
   });
   if (document.readyState !== 'loading') {
-    setTimeout(prepareWavelengthBackGuard, 100);
+    setTimeout(prepareWavelengthBackGuard, 150);
   }
 
   // ---------- Sound + browser notification ----------
