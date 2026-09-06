@@ -28,6 +28,8 @@
   const scanLabel = document.getElementById('scanLabel');
   const scanSub = document.getElementById('scanSub');
   const contactsSection = document.getElementById('contactsSection');
+  const accountBar = document.getElementById('accountBar');
+  const accountBarText = document.getElementById('accountBarText');
   const settingsAccountBtn = document.getElementById('settingsAccountBtn');
   const settingsAccountAction = document.getElementById('settingsAccountAction');
   const settingsSignOutBtn = document.getElementById('settingsSignOutBtn');
@@ -72,6 +74,8 @@
   const friendCodeToast = document.getElementById('friendCodeToast');
   const friendCodeText = document.getElementById('friendCodeText');
 
+  const inboxBtn = document.getElementById('inboxBtn');
+  const inboxBadge = document.getElementById('inboxBadge');
   const inboxBackBtn = document.getElementById('inboxBackBtn');
   const inboxList = document.getElementById('inboxList');
   const avatarGrid = document.getElementById('avatarGrid');
@@ -117,7 +121,7 @@
   const activeCallName = document.getElementById('activeCallName');
   const activeCallStatus = document.getElementById('activeCallStatus');
   const callHangupBtn = document.getElementById('callHangupBtn');
-  const callBarQuickHangup = document.getElementById('callBarQuickHangup');
+  const callBarHangupBtn = document.getElementById('callBarHangupBtn');
   const callBarMain = document.getElementById('callBarMain');
   const callBarControls = document.getElementById('callBarControls');
   const callDuration = document.getElementById('callDuration');
@@ -133,6 +137,7 @@
   let pendingConnectByCode = false;
   let chatHistoryPushed = false;
   let reconnectAttempts = 0;
+  let reconnectTimer = null;
   let userInitiatedClose = false;
   let currentThreadContactId = null;
   let pendingNotificationChatId = null;
@@ -140,6 +145,8 @@
   let threadHasMore = false;
   let loadingOlderThread = false;
   let threadRenderTarget = threadLog;
+  // Prevent duplicate DOM messages when a live message races with thread history/reconnect.
+  let renderedThreadMessageIds = new Set();
   let latestContacts = [];
   let selectedReply = null;
   let presenceById = new Map();
@@ -148,7 +155,6 @@
   let peerConnection = null;
   let localCallStream = null;
   let activeCallContactId = null;
-  let callNoAnswerTimer = null;
   let activeCallContactName = 'Contact';
   let activeCallContactAvatar = 'boy1';
   let pendingIncomingCall = null;
@@ -158,29 +164,35 @@
   let isSpeakerOn = true;
   let pendingIceCandidates = [];
   let callDisconnectTimer = null;
+  let callInviteTimeout = null;
   let callReconnectInProgress = false;
   let callStatsTimer = null;
   let callHistory = [];
   let activeCallDirection = 'outgoing';
   loadCallHistory();
-  const rtcConfig = {
+  let rtcConfig = {
     iceServers: [
       { urls: 'stun:stun.l.google.com:19302' },
       { urls: 'stun:stun1.l.google.com:19302' },
-      { urls: 'stun:stun.cloudflare.com:3478' },
-      // TURN relay: without this, calls between two phones on mobile data
-      // (very common on carrier-grade NAT, e.g. Jio/Airtel) can fail to find
-      // a direct path and produce garbled/partial audio instead of failing
-      // cleanly. This is a free, shared/rate-limited public relay (Open
-      // Relay Project) — fine for a small group, but swap in your own paid
-      // TURN credentials (Twilio, Xirsys, metered.ca) if usage grows.
-      { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
-      { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
-      { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' }
+      { urls: 'stun:stun.cloudflare.com:3478' }
     ],
     bundlePolicy: 'max-bundle',
     rtcpMuxPolicy: 'require'
   };
+
+  async function loadRtcConfig() {
+    try {
+      const response = await fetch('/api/rtc-config', { cache: 'no-store' });
+      if (!response.ok) return;
+      const data = await response.json();
+      if (Array.isArray(data.iceServers) && data.iceServers.length) {
+        rtcConfig = { ...rtcConfig, iceServers: data.iceServers };
+      }
+    } catch (err) {
+      console.warn('RTC config unavailable; using STUN fallback.', err);
+    }
+  }
+  loadRtcConfig();
 
   // ---------- Persistent device identity (for the inbox feature only) ----------
   const DEVICE_ID_KEY = 'wavelength_device_id';
@@ -202,10 +214,13 @@
   let myAccountEmail = localStorage.getItem('wavelength_account_email') || null;
 
   // ---------- Account (optional email login on top of the anonymous system) ----------
-  // Note: account status is shown in the Settings screen (settingsAccountAction/
-  // settingsAccountText below) — this function is a no-op kept only so its
-  // existing call sites don't need touching.
-  function updateAccountBarDisplay() {}
+  function updateAccountBarDisplay() {
+    if (accountBarText) {
+      accountBarText.textContent = myAccountEmail
+        ? `👤 Signed in as ${myAccountEmail}`
+        : '🔐 Sign in to keep your inbox everywhere';
+    }
+  }
 
   function updateSettingsAccountUI() {
     if (!settingsAccountText) return;
@@ -252,6 +267,7 @@
     accountModal.classList.add('hidden');
   }
 
+  if (accountBar) accountBar.addEventListener('click', showAccountModal);
   if (settingsAccountBtn) settingsAccountBtn.addEventListener('click', showAccountModal);
   if (settingsAccountAction) settingsAccountAction.addEventListener('click', showAccountModal);
   accountModalClose.addEventListener('click', hideAccountModal);
@@ -494,15 +510,19 @@
   setInterval(() => { dialFreq.textContent = randomFreq(); }, 900);
 
   // ---------- Android / browser Back button ----------
-  // App navigation uses one persistent browser-history guard:
-  //   Inner screen + Back -> Home
-  //   Home + Back -> Wavelength exit dialog
-  // The dialog's Yes button navigates to Google's homepage. It never
-  // attempts to force-close a normal Chrome tab.
+  // Keep one app-owned history guard on top of the current screen. A Back
+  // press first lands on the current screen state, where we can route to Home;
+  // Back on Home is intercepted and shows the exit dialog.
   let wavelengthBackReady = false;
   let wavelengthCloseDialog = null;
   let wavelengthBackBusy = false;
-  let wavelengthRestoringHomeGuard = false;
+
+  function ensureWavelengthBackGuard() {
+    if (!wavelengthBackReady) return;
+    if (!history.state || !history.state.wavelengthGuard) {
+      history.pushState({ wavelengthGuard: true, wavelengthApp: true }, '', location.href);
+    }
+  }
 
   function pushNavState(screenName) {
     if (!wavelengthBackReady) return;
@@ -511,10 +531,10 @@
   }
 
   function pushChatHistoryState() {
-    if (!chatHistoryPushed) {
-      history.pushState({ wavelengthScreen: 'chat', wavelengthApp: true }, '', location.href);
-      chatHistoryPushed = true;
-    }
+    if (!wavelengthBackReady) return;
+    history.replaceState({ wavelengthScreen: 'chat', wavelengthApp: true }, '', location.href);
+    ensureWavelengthBackGuard();
+    chatHistoryPushed = true;
   }
 
   function exitChatToLanding() {
@@ -524,10 +544,8 @@
     emojiPanel.classList.add('hidden');
     showScreen('landing');
     refreshInboxBadge();
-    if (wavelengthBackReady) {
-      history.replaceState({ wavelengthScreen: 'landing', wavelengthApp: true }, '', location.href);
-      ensureWavelengthBackGuard();
-    }
+    pushNavState('landing');
+    chatHistoryPushed = false;
   }
 
   function isHomeScreen() {
@@ -558,14 +576,10 @@
       overlay.classList.remove('show');
       document.body.classList.remove('wavelength-dialog-open');
     };
-
     overlay.querySelector('.wavelength-close-no').addEventListener('click', hide);
-    overlay.addEventListener('click', (event) => {
-      if (event.target === overlay) hide();
-    });
+    overlay.addEventListener('click', (event) => { if (event.target === overlay) hide(); });
     overlay.querySelector('.wavelength-close-yes').addEventListener('click', () => {
-      // A normal user-opened Chrome tab cannot be force-closed by a website.
-      // Navigate to Chrome's Google homepage instead, as requested.
+      // A normal browser tab cannot be force-closed by page JavaScript.
       window.location.assign('https://www.google.com/');
     });
 
@@ -579,44 +593,23 @@
     document.body.classList.add('wavelength-dialog-open');
   }
 
-  function ensureWavelengthBackGuard() {
-    if (!wavelengthBackReady) return;
-    if (!history.state || !history.state.wavelengthGuard) {
-      history.pushState({ wavelengthGuard: true, wavelengthApp: true }, '', location.href);
-    }
-  }
-
   function prepareWavelengthBackGuard() {
     if (wavelengthBackReady) return;
     wavelengthBackReady = true;
-
-    // Replace the current page entry with Home, then put one guard entry
-    // above it. Android Chrome Back will therefore fire popstate instead of
-    // immediately leaving the page.
     history.replaceState({ wavelengthScreen: 'landing', wavelengthApp: true }, '', location.href);
     history.pushState({ wavelengthGuard: true, wavelengthApp: true }, '', location.href);
   }
 
   window.addEventListener('popstate', () => {
-    if (!wavelengthBackReady) return;
-
-    // Home Back first lands on the Home entry after popping the guard.
-    // Move forward to the guard again, then show the dialog. The flag
-    // prevents the restoration popstate from running the normal handler.
-    if (wavelengthRestoringHomeGuard) {
-      wavelengthRestoringHomeGuard = false;
-      showCloseDialog();
-      return;
-    }
-
-    if (wavelengthBackBusy) return;
+    if (!wavelengthBackReady || wavelengthBackBusy) return;
     wavelengthBackBusy = true;
 
-    // Decide from the actual visible screen, not from history.state. This
-    // makes the behavior reliable even when chat/thread entries exist.
-    const wasHome = isHomeScreen();
-
-    if (!wasHome) {
+    if (isHomeScreen()) {
+      // Restore the guard immediately so another Back press remains inside the
+      // app. The dialog is purely visual and does not depend on browser UI.
+      ensureWavelengthBackGuard();
+      showCloseDialog();
+    } else {
       if (screens.chat && !screens.chat.classList.contains('hidden')) {
         chatHistoryPushed = false;
         if (ws && ws.readyState === WebSocket.OPEN) {
@@ -624,7 +617,6 @@
         }
         emojiPanel.classList.add('hidden');
       }
-
       if (screens.thread && !screens.thread.classList.contains('hidden')) {
         if (mediaRecorder && mediaRecorder.state === 'recording') {
           try { stopRecording(false); } catch (_) {}
@@ -635,33 +627,16 @@
         currentThreadContactId = null;
         sendWs('get_contacts');
       }
-
       showScreen('landing');
       refreshInboxBadge();
-      history.replaceState({ wavelengthScreen: 'landing', wavelengthApp: true }, '', location.href);
-      ensureWavelengthBackGuard();
-    } else {
-      // Home is the only place where Android Back opens the Wavelength dialog.
-      // Restore the guard entry first so the browser remains inside Wavelength.
-      wavelengthRestoringHomeGuard = true;
-      try {
-        history.go(1);
-      } catch (_) {
-        wavelengthRestoringHomeGuard = false;
-        ensureWavelengthBackGuard();
-        showCloseDialog();
-      }
+      pushNavState('landing');
     }
 
     setTimeout(() => { wavelengthBackBusy = false; }, 120);
   });
 
-  document.addEventListener('DOMContentLoaded', () => {
-    setTimeout(prepareWavelengthBackGuard, 150);
-  });
-  if (document.readyState !== 'loading') {
-    setTimeout(prepareWavelengthBackGuard, 150);
-  }
+  // script.js is loaded at the end of <body>, so arm the guard synchronously.
+  prepareWavelengthBackGuard();
 
   // ---------- Sound + browser notification ----------
   // ---------- Sound + browser notification ----------
@@ -854,6 +829,15 @@
       ws.send(JSON.stringify({ type: 'whoami' }));
       refreshInboxBadge();
 
+      // Restore an open inbox thread after a transient network/WebSocket drop.
+      if (currentThreadContactId && !screens.thread.classList.contains('hidden')) {
+        setTimeout(() => {
+          if (ws && ws.readyState === WebSocket.OPEN && currentThreadContactId) {
+            ws.send(JSON.stringify({ type: 'open_thread', contactId: currentThreadContactId }));
+          }
+        }, 50);
+      }
+
       if (pendingConnectByCode) {
         ws.send(JSON.stringify({ type: 'connect_code', code: pendingConnectByCode }));
         pendingConnectByCode = false;
@@ -874,9 +858,13 @@
   }
 
   function attemptReconnect() {
+    if (reconnectTimer) return;
     reconnectAttempts += 1;
     const delay = Math.min(1000 * reconnectAttempts, 5000);
-    setTimeout(connectSocket, delay);
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      if (!ws || ws.readyState === WebSocket.CLOSED) connectSocket();
+    }, delay);
   }
 
   function sendWs(type, payload = {}) {
@@ -907,19 +895,6 @@
           updateAccountBarDisplay();
           updateSettingsAccountUI();
           refreshSettingsProfile();
-        }
-        break;
-
-      case 'profile_restore':
-        // Fires after 'identify' if this deviceId has a saved profile —
-        // most relevant right after logging into an account on a new
-        // browser/device, so your name and avatar come back too, not
-        // just your contacts and inbox.
-        if (msg.name) {
-          nameInput.value = msg.name;
-        }
-        if (msg.avatar && isValidAvatarId(msg.avatar)) {
-          setMyAvatarId(msg.avatar);
         }
         break;
 
@@ -1007,20 +982,6 @@
         break;
 
       // ---- Inbox events ----
-      case 'profile_updated': {
-        const index = latestContacts.findIndex(c => c.contactId === msg.deviceId);
-        if (index >= 0) {
-          latestContacts[index].name = msg.name || 'Stranger';
-          latestContacts[index].avatar = msg.avatar || 'boy1';
-          renderInboxList();
-          if (currentThreadContactId === msg.deviceId) {
-            threadWithLabel.textContent = latestContacts[index].name;
-            renderAvatarInto(threadAvatar, latestContacts[index].avatar);
-          }
-        }
-        break;
-      }
-
       case 'contacts_list':
         latestContacts = msg.contacts || [];
         latestContacts.forEach(c => presenceById.set(c.contactId, { online: !!c.online, lastSeenAt: c.lastSeenAt }));
@@ -1051,6 +1012,7 @@
         if (msg.contactId === currentThreadContactId) {
           threadLog.innerHTML = '';
           threadTypingRow = null;
+          renderedThreadMessageIds = new Set();
           threadOldestId = msg.oldestId || null;
           threadHasMore = !!msg.hasMore;
           const previousTarget = threadRenderTarget;
@@ -1126,6 +1088,21 @@
         updateMessageReactions(msg.id, msg.reactions || []);
         break;
 
+      case 'profile_updated': {
+        const contact = latestContacts.find(c => c.contactId === msg.deviceId);
+        if (contact) {
+          contact.name = msg.name || contact.name;
+          contact.avatar = msg.avatarId || contact.avatar;
+          if (currentThreadContactId === msg.deviceId) {
+            threadWithLabel.textContent = contact.name || 'Contact';
+            renderAvatarInto(threadAvatar, contact.avatar);
+            updateThreadPresence(msg.deviceId);
+          }
+          renderInboxList();
+        }
+        break;
+      }
+
       case 'presence':
         presenceById.set(msg.deviceId, { online: !!msg.online, lastSeenAt: msg.lastSeenAt || new Date().toISOString() });
         updateContactPresence(msg.deviceId);
@@ -1146,6 +1123,15 @@
         incomingCallName.textContent = msg.fromName || 'Contact';
         setCallAvatar(incomingCallAvatar, msg.fromAvatar || 'boy1');
         incomingCallModal.classList.remove('hidden');
+        clearTimeout(callInviteTimeout);
+        callInviteTimeout = setTimeout(() => {
+          if (pendingIncomingCall?.fromId === msg.fromId) {
+            const fromId = pendingIncomingCall.fromId;
+            pendingIncomingCall = null;
+            incomingCallModal.classList.add('hidden');
+            sendWs('call_end', { toDeviceId: fromId });
+          }
+        }, 30000);
         break;
 
       case 'call_signal':
@@ -1158,15 +1144,6 @@
           incomingCallModal.classList.add('hidden');
         }
         if (activeCallContactId === msg.fromId) endCall(false);
-        break;
-
-      case 'call_unavailable':
-        if (activeCallContactId === msg.toDeviceId) {
-          clearTimeout(callNoAnswerTimer);
-          callNoAnswerTimer = null;
-          activeCallStatus.textContent = msg.reason === 'offline' ? 'Offline' : 'Unavailable';
-          setTimeout(() => endCall(false), 1400);
-        }
         break;
 
       case 'inbox_typing':
@@ -1198,6 +1175,9 @@
   }
 
   function renderThreadMessage(m) {
+    const messageId = String(m?._id || m?.id || '');
+    if (messageId && renderedThreadMessageIds.has(messageId)) return false;
+    if (messageId) renderedThreadMessageIds.add(messageId);
     const who = m.fromId === myDeviceId ? 'me' : 'them';
     if (m.msgType === 'voice') {
       addVoiceBubble(m.audioData, m.duration, who, m.createdAt, m._id || m.id, m);
@@ -1208,6 +1188,7 @@
     } else {
       addThreadBubble(m.text, who, m.createdAt, m._id || m.id, m);
     }
+    return true;
   }
 
   // WhatsApp-style bubble for the Inbox/Thread screen (includes timestamp + read ticks).
@@ -1226,9 +1207,9 @@
     if (msgId) bubble.dataset.msgId = msgId;
 
     bubble.innerHTML = `<div class="wa-bubble__reply-placeholder"></div><span class="wa-bubble__text">${linked}</span><span class="wa-bubble__time">${formatBubbleTime(timestamp || Date.now())}</span>`;
-    decorateThreadBubble(bubble, meta, who);
 
     row.appendChild(bubble);
+    decorateThreadBubble(bubble, meta, who);
     threadRenderTarget.appendChild(row);
     if (threadRenderTarget === threadLog) threadLog.scrollTop = threadLog.scrollHeight;
   }
@@ -1263,8 +1244,8 @@
     bubble.appendChild(replyPlaceholder);
     bubble.appendChild(img);
     bubble.appendChild(timeMeta);
-    decorateThreadBubble(bubble, meta, who);
     row.appendChild(bubble);
+    decorateThreadBubble(bubble, meta, who);
     threadRenderTarget.appendChild(row);
     if (threadRenderTarget === threadLog) threadLog.scrollTop = threadLog.scrollHeight;
   }
@@ -1341,8 +1322,8 @@
     timeMeta.className = 'wa-bubble__time';
     bubble.appendChild(timeMeta);
 
-    decorateThreadBubble(bubble, fileMeta, who);
     row.appendChild(bubble);
+    decorateThreadBubble(bubble, fileMeta, who);
     threadRenderTarget.appendChild(row);
     if (threadRenderTarget === threadLog) threadLog.scrollTop = threadLog.scrollHeight;
   }
@@ -1596,27 +1577,78 @@
 
   function clearReply() { selectedReply = null; replyComposer.classList.add('hidden'); }
 
+  let activeReactionPicker = null;
+
+  function closeReactionPicker() {
+    if (activeReactionPicker) activeReactionPicker.remove();
+    activeReactionPicker = null;
+  }
+
   function showReactionChoices(bubble) {
-    let picker = bubble.querySelector('.wa-reaction-picker');
-    if (picker) { picker.remove(); return; }
-    picker = document.createElement('div');
+    closeReactionPicker();
+    if (!bubble?.dataset.msgId) return;
+
+    const picker = document.createElement('div');
     picker.className = 'wa-reaction-picker';
-    ['❤️','😂','👍','😮','😢','🔥'].forEach(emoji => {
-      const b = document.createElement('button'); b.type = 'button'; b.textContent = emoji;
-      b.addEventListener('click', () => { sendWs('message_reaction', { id: bubble.dataset.msgId, emoji }); picker.remove(); });
+    picker.setAttribute('role', 'menu');
+    const reactions = ['❤️','😂','👍','😮','😢','🔥'];
+    reactions.forEach(emoji => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = emoji;
+      b.setAttribute('aria-label', `React ${emoji}`);
+      b.addEventListener('click', (event) => {
+        event.stopPropagation();
+        sendWs('message_reaction', { id: bubble.dataset.msgId, emoji });
+        closeReactionPicker();
+      });
       picker.appendChild(b);
     });
-    bubble.appendChild(picker);
+    document.body.appendChild(picker);
+    activeReactionPicker = picker;
+
+    const rect = bubble.getBoundingClientRect();
+    const width = picker.offsetWidth || 230;
+    const left = Math.min(Math.max(8, rect.left), Math.max(8, window.innerWidth - width - 8));
+    const top = rect.top >= 70 ? rect.top - picker.offsetHeight - 8 : rect.bottom + 8;
+    picker.style.left = `${left}px`;
+    picker.style.top = `${Math.max(8, top)}px`;
   }
 
   function renderReactionBar(bubble, reactions) {
-    let bar = bubble.querySelector('.wa-reactions');
+    const row = bubble?.parentElement;
+    if (!row) return;
+    let bar = row.querySelector('.wa-reactions');
     if (!reactions || !reactions.length) { if (bar) bar.remove(); return; }
     const counts = {};
-    reactions.forEach(r => counts[r.emoji] = (counts[r.emoji] || 0) + 1);
-    if (!bar) { bar = document.createElement('div'); bar.className = 'wa-reactions'; bubble.appendChild(bar); }
-    bar.innerHTML = Object.entries(counts).map(([e,c]) => `<span>${e}${c > 1 ? `<b>${c}</b>` : ''}</span>`).join('');
+    const mine = new Set();
+    reactions.forEach(r => {
+      const emoji = String(r.emoji || '');
+      if (!emoji) return;
+      counts[emoji] = (counts[emoji] || 0) + 1;
+      if (r.userId === myDeviceId) mine.add(emoji);
+    });
+    if (!bar) { bar = document.createElement('div'); bar.className = 'wa-reactions'; row.appendChild(bar); }
+    bar.replaceChildren();
+    Object.entries(counts).forEach(([emoji, count]) => {
+      const chip = document.createElement('button');
+      chip.type = 'button';
+      chip.className = `wa-reaction-chip${mine.has(emoji) ? ' is-mine' : ''}`;
+      chip.textContent = `${emoji}${count > 1 ? ` ${count}` : ''}`;
+      chip.title = mine.has(emoji) ? 'Remove your reaction' : 'Change to this reaction';
+      chip.addEventListener('click', (event) => {
+        event.stopPropagation();
+        sendWs('message_reaction', { id: bubble.dataset.msgId, emoji });
+      });
+      bar.appendChild(chip);
+    });
   }
+
+  window.addEventListener('scroll', closeReactionPicker, true);
+  window.addEventListener('resize', closeReactionPicker);
+  document.addEventListener('click', (event) => {
+    if (activeReactionPicker && !activeReactionPicker.contains(event.target) && !event.target.closest('[data-action="react"]')) closeReactionPicker();
+  });
 
   function updateMessageStatus(id, status) {
     const bubble = threadLog.querySelector(`[data-msg-id="${CSS.escape(String(id))}"]`);
@@ -1640,7 +1672,9 @@
     const bubble = threadLog.querySelector(`[data-msg-id="${CSS.escape(String(id))}"]`);
     if (!bubble) return;
     bubble.classList.add('wa-bubble--deleted');
-    bubble.querySelectorAll('img,.wa-voice-bubble,.wa-message-actions,.wa-reactions,.wa-reaction-picker').forEach(el => el.remove());
+    closeReactionPicker();
+    bubble.querySelectorAll('img,.wa-voice-bubble,.wa-message-actions,.wa-reaction-picker').forEach(el => el.remove());
+    bubble.parentElement?.querySelector('.wa-reactions')?.remove();
     const text = bubble.querySelector('.wa-bubble__text');
     if (text) text.textContent = 'This message was deleted'; else { const t = document.createElement('span'); t.className='wa-bubble__text'; t.textContent='This message was deleted'; bubble.prepend(t); }
   }
@@ -1732,6 +1766,10 @@
   // ---------- Inbox rendering ----------
   function updateInboxBadge() {
     const totalUnread = latestContacts.reduce((sum, c) => sum + (c.unreadCount || 0), 0);
+    if (inboxBadge) {
+      inboxBadge.textContent = totalUnread > 99 ? '99+' : String(totalUnread);
+      inboxBadge.classList.toggle('hidden', totalUnread === 0);
+    }
     if (bottomInboxBadge) {
       bottomInboxBadge.textContent = totalUnread > 99 ? '99+' : String(totalUnread);
       bottomInboxBadge.classList.toggle('hidden', totalUnread === 0);
@@ -1864,6 +1902,8 @@
   function hideCallUI() {
     incomingCallModal.classList.add('hidden');
     activeCallBar.classList.add('hidden');
+    clearTimeout(callInviteTimeout);
+    callInviteTimeout = null;
     activeCallBar.classList.remove('expanded');
     callBarMain.setAttribute('aria-expanded', 'false');
     stopCallTimer();
@@ -1871,8 +1911,8 @@
   }
 
   function setCallConnected() {
-    clearTimeout(callNoAnswerTimer);
-    callNoAnswerTimer = null;
+    clearTimeout(callInviteTimeout);
+    callInviteTimeout = null;
     activeCallStatus.textContent = 'Connected';
     startCallTimer();
     startCallQualityMonitor();
@@ -2077,6 +2117,7 @@
       return;
     }
     try {
+      await loadRtcConfig();
       activeCallContactId = currentThreadContactId;
       activeCallContactName = threadWithLabel.textContent || 'Contact';
       activeCallContactAvatar = latestContacts.find(c => c.contactId === activeCallContactId)?.avatar || 'boy1';
@@ -2086,19 +2127,16 @@
       await createPeerConnection(activeCallContactId, false);
       sendWs('call_invite', {
         toDeviceId: activeCallContactId,
-        fromName: activeCallContactName,
+        fromName: (nameInput.value.trim() || 'Stranger'),
         fromAvatar: getMyAvatarId()
       });
-
-      // If nobody answers within 35s, stop trying instead of showing
-      // "Calling…" forever with no feedback.
-      clearTimeout(callNoAnswerTimer);
-      callNoAnswerTimer = setTimeout(() => {
-        if (activeCallContactId && activeCallStatus.textContent !== 'Connected') {
-          activeCallStatus.textContent = 'No answer';
-          setTimeout(() => endCall(true), 1200);
+      clearTimeout(callInviteTimeout);
+      callInviteTimeout = setTimeout(() => {
+        if (activeCallContactId && !callStartedAt) {
+          addSystemBubble('No answer. Call ended.');
+          endCall(true);
         }
-      }, 35000);
+      }, 30000);
     } catch (err) {
       console.error('startCall failed:', err);
       endCall(false);
@@ -2110,6 +2148,8 @@
     if (!pendingIncomingCall) return;
     const call = pendingIncomingCall;
     pendingIncomingCall = null;
+    clearTimeout(callInviteTimeout);
+    callInviteTimeout = null;
     incomingCallModal.classList.add('hidden');
     activeCallContactId = call.fromId;
     activeCallContactName = call.fromName || 'Contact';
@@ -2130,14 +2170,14 @@
   function declineIncomingCall() {
     if (pendingIncomingCall) sendWs('call_end', { toDeviceId: pendingIncomingCall.fromId });
     pendingIncomingCall = null;
+    clearTimeout(callInviteTimeout);
+    callInviteTimeout = null;
     incomingCallModal.classList.add('hidden');
   }
 
   function endCall(notify = true) {
     clearTimeout(callDisconnectTimer);
     callDisconnectTimer = null;
-    clearTimeout(callNoAnswerTimer);
-    callNoAnswerTimer = null;
     callReconnectInProgress = false;
     pendingIceCandidates = [];
     const contactId = activeCallContactId;
@@ -2196,6 +2236,7 @@
 
   function openThread(contactId, name, avatarId) {
     currentThreadContactId = contactId;
+    renderedThreadMessageIds = new Set();
     threadWithLabel.textContent = name;
     renderAvatarInto(threadAvatar, avatarId);
     presenceById.set(contactId, { online: !!(latestContacts.find(c => c.contactId === contactId)?.online), lastSeenAt: latestContacts.find(c => c.contactId === contactId)?.lastSeenAt });
@@ -2222,6 +2263,7 @@
     requestNotificationPermission();
     pendingConnectByCode = false;
     showScreen('searching');
+    pushNavState('searching');
     scanLabel.innerHTML = 'Scanning frequencies<span class="dots"><span>.</span><span>.</span><span>.</span></span>';
     scanSub.textContent = 'Looking for someone else tuned in right now';
     sendWs('find');
@@ -2240,6 +2282,7 @@
     if (!code) return;
     requestNotificationPermission();
     showScreen('searching');
+    pushNavState('searching');
     sendWs('connect_code', { code });
   });
 
@@ -2252,6 +2295,7 @@
     sendWs('leave');
     pendingConnectByCode = false;
     showScreen('landing');
+    pushNavState('landing');
   });
 
   // ---------- Chat actions (live random/paired chat) ----------
@@ -2290,6 +2334,7 @@
     emojiPanel.classList.add('hidden');
     sendWs('skip');
     showScreen('searching');
+    pushNavState('searching');
     scanLabel.innerHTML = 'Scanning frequencies<span class="dots"><span>.</span><span>.</span><span>.</span></span>';
     scanSub.textContent = 'Looking for someone else tuned in right now';
   });
@@ -2303,6 +2348,7 @@
     leftToast.classList.add('hidden');
     sendWs('find');
     showScreen('searching');
+    pushNavState('searching');
   });
 
   // ---------- Friend requests ----------
@@ -2322,17 +2368,26 @@
   });
 
   // ---------- Inbox / Thread navigation ----------
+  if (inboxBtn) inboxBtn.addEventListener('click', () => {
+    showScreen('inbox');
+    pushNavState('inbox');
+    sendWs('get_contacts');
+  });
+
   if (bottomNav) bottomNav.querySelectorAll('.bottom-nav__item').forEach((item) => {
     item.addEventListener('click', () => {
       const tab = item.dataset.tab;
       if (tab === 'landing') {
         showScreen('landing');
+        pushNavState('landing');
       } else if (tab === 'inbox') {
         showScreen('inbox');
+        pushNavState('inbox');
         sendWs('get_contacts');
       } else if (tab === 'settings') {
         refreshSettingsProfile();
         showScreen('settings');
+        pushNavState('settings');
       }
     });
   });
@@ -2571,7 +2626,7 @@
   callAcceptBtn.addEventListener('click', acceptIncomingCall);
   callDeclineBtn.addEventListener('click', declineIncomingCall);
   callHangupBtn.addEventListener('click', (event) => { event.stopPropagation(); endCall(true); });
-  callBarQuickHangup.addEventListener('click', (event) => { event.stopPropagation(); endCall(true); });
+  callBarHangupBtn?.addEventListener('click', (event) => { event.stopPropagation(); endCall(true); });
   callBarMain.addEventListener('click', () => {
     const expanded = activeCallBar.classList.toggle('expanded');
     callBarMain.setAttribute('aria-expanded', String(expanded));
