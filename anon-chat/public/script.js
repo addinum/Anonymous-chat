@@ -496,38 +496,14 @@
   setInterval(() => { dialFreq.textContent = randomFreq(); }, 900);
 
   // ---------- Android / browser Back button ----------
-  // Keep a same-document history sentinel on Home. Android Chrome's Back
-  // button therefore fires popstate instead of immediately leaving Wavelength.
-  // Inner screens consume Back and return to Home; Home shows our own dialog.
+  // Use one same-document sentinel and restore it with history.forward().
+  // This is deliberately small and synchronous: Android Chrome must have the
+  // sentinel in its history stack before the user can press Back.
   let wavelengthBackReady = false;
   let wavelengthCloseDialog = null;
   let wavelengthBackBusy = false;
-
-  function pushNavState(screenName) {
-    if (!wavelengthBackReady) return;
-    history.replaceState({ wavelengthScreen: screenName, wavelengthApp: true }, '', location.href);
-    ensureWavelengthBackGuard();
-  }
-
-  function pushChatHistoryState() {
-    if (!chatHistoryPushed) {
-      history.pushState({ wavelengthScreen: 'chat', wavelengthApp: true }, '', location.href);
-      chatHistoryPushed = true;
-    }
-  }
-
-  function exitChatToLanding() {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      try { ws.send(JSON.stringify({ type: 'leave' })); } catch (_) {}
-    }
-    emojiPanel.classList.add('hidden');
-    showScreen('landing');
-    refreshInboxBadge();
-    if (wavelengthBackReady) {
-      history.replaceState({ wavelengthScreen: 'landing', wavelengthApp: true }, '', location.href);
-      ensureWavelengthBackGuard();
-    }
-  }
+  let wavelengthRestoringHome = false;
+  let wavelengthCurrentScreen = 'landing';
 
   function isHomeScreen() {
     return !!(screens.landing && !screens.landing.classList.contains('hidden'));
@@ -556,9 +532,7 @@
     const hide = () => {
       overlay.classList.remove('show');
       document.body.classList.remove('wavelength-dialog-open');
-      // Re-arm the sentinel after No so the next Android Back still opens
-      // the Wavelength dialog rather than leaving the page.
-      armHomeBackGuard();
+      ensureHomeSentinel();
     };
 
     overlay.querySelector('.wavelength-close-no').addEventListener('click', hide);
@@ -566,6 +540,8 @@
       if (event.target === overlay) hide();
     });
     overlay.querySelector('.wavelength-close-yes').addEventListener('click', () => {
+      // Chrome will not allow a normal web page to close its own tab. The
+      // requested exit action is therefore navigation to the Chrome homepage.
       window.location.assign('https://www.google.com/');
     });
 
@@ -579,67 +555,125 @@
     document.body.classList.add('wavelength-dialog-open');
   }
 
-  function ensureWavelengthBackGuard() {
+  function ensureHomeSentinel() {
     if (!wavelengthBackReady) return;
-    if (!history.state || !history.state.wavelengthGuard) {
-      history.pushState({ wavelengthGuard: true, wavelengthApp: true, wavelengthScreen: 'landing' }, '', location.href);
-    }
+    if (history.state?.wavelengthGuard === true) return;
+    history.pushState({ wavelengthGuard: true, wavelengthApp: true }, '', location.href);
   }
 
   function armHomeBackGuard() {
+    // Replace the current document entry with a known Wavelength base entry,
+    // then add exactly one guard entry. Do this synchronously at script load.
     wavelengthBackReady = true;
+    wavelengthRestoringHome = false;
+    wavelengthCurrentScreen = 'landing';
     history.replaceState({ wavelengthScreen: 'landing', wavelengthApp: true }, '', location.href);
-    // Two sentinel entries make the Home trap resilient to Android Chrome's
-    // gesture/system Back navigation while keeping the URL unchanged.
-    history.pushState({ wavelengthGuard: true, wavelengthApp: true, wavelengthScreen: 'landing' }, '', location.href);
-    history.pushState({ wavelengthGuard: true, wavelengthApp: true, wavelengthScreen: 'landing' }, '', location.href);
+    history.pushState({ wavelengthGuard: true, wavelengthApp: true }, '', location.href);
   }
 
-  window.addEventListener('popstate', () => {
-    if (!wavelengthBackReady || wavelengthBackBusy) return;
-    wavelengthBackBusy = true;
+  function pushNavState(screenName) {
+    if (!wavelengthBackReady) return;
+    if (wavelengthCurrentScreen === screenName && history.state?.wavelengthGuard === true) return;
+    // The current entry is the guard. Turn it into the current screen and add
+    // exactly one fresh guard. Repeated calls for the same screen are ignored
+    // so network events cannot stack invisible history entries.
+    wavelengthCurrentScreen = screenName;
+    history.replaceState({ wavelengthScreen: screenName, wavelengthApp: true }, '', location.href);
+    history.pushState({ wavelengthGuard: true, wavelengthApp: true }, '', location.href);
+  }
 
-    const wasHome = isHomeScreen();
+  function pushChatHistoryState() {
+    if (!wavelengthBackReady || chatHistoryPushed) return;
+    pushNavState('chat');
+    chatHistoryPushed = true;
+  }
 
-    if (!wasHome) {
-      if (screens.chat && !screens.chat.classList.contains('hidden')) {
-        chatHistoryPushed = false;
-        if (ws && ws.readyState === WebSocket.OPEN) {
-          try { ws.send(JSON.stringify({ type: 'leave' })); } catch (_) {}
-        }
-        emojiPanel.classList.add('hidden');
-      }
-
-      if (screens.thread && !screens.thread.classList.contains('hidden')) {
-        if (mediaRecorder && mediaRecorder.state === 'recording') {
-          try { stopRecording(false); } catch (_) {}
-        }
-        if (ws && ws.readyState === WebSocket.OPEN) {
-          try { ws.send(JSON.stringify({ type: 'close_thread' })); } catch (_) {}
-        }
-        currentThreadContactId = null;
-        sendWs('get_contacts');
-      }
-
-      showScreen('landing');
-      refreshInboxBadge();
+  function exitChatToLanding() {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      try { ws.send(JSON.stringify({ type: 'leave' })); } catch (_) {}
+    }
+    emojiPanel.classList.add('hidden');
+    showScreen('landing');
+    refreshInboxBadge();
+    if (wavelengthBackReady) {
+      wavelengthCurrentScreen = 'landing';
       history.replaceState({ wavelengthScreen: 'landing', wavelengthApp: true }, '', location.href);
-      // Rebuild the Home sentinel immediately after consuming Back.
-      history.pushState({ wavelengthGuard: true, wavelengthApp: true, wavelengthScreen: 'landing' }, '', location.href);
-      history.pushState({ wavelengthGuard: true, wavelengthApp: true, wavelengthScreen: 'landing' }, '', location.href);
-    } else {
-      // Re-arm first, then show the custom dialog. The page never attempts to
-      // call window.close(), because Chrome blocks closing ordinary tabs.
-      history.pushState({ wavelengthGuard: true, wavelengthApp: true, wavelengthScreen: 'landing' }, '', location.href);
-      showCloseDialog();
+      ensureHomeSentinel();
+    }
+  }
+
+  function goHomeFromInnerScreen() {
+    if (screens.chat && !screens.chat.classList.contains('hidden')) {
+      chatHistoryPushed = false;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        try { ws.send(JSON.stringify({ type: 'leave' })); } catch (_) {}
+      }
+      emojiPanel.classList.add('hidden');
     }
 
-    setTimeout(() => { wavelengthBackBusy = false; }, 80);
+    if (screens.thread && !screens.thread.classList.contains('hidden')) {
+      if (mediaRecorder && mediaRecorder.state === 'recording') {
+        try { stopRecording(false); } catch (_) {}
+      }
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        try { ws.send(JSON.stringify({ type: 'close_thread' })); } catch (_) {}
+      }
+      currentThreadContactId = null;
+      sendWs('get_contacts');
+    }
+
+    showScreen('landing');
+    refreshInboxBadge();
+    wavelengthCurrentScreen = 'landing';
+    history.replaceState({ wavelengthScreen: 'landing', wavelengthApp: true }, '', location.href);
+    ensureHomeSentinel();
+  }
+
+  window.addEventListener('popstate', (event) => {
+    if (!wavelengthBackReady) return;
+
+    const state = event.state || {};
+
+    // history.forward() used for the Home guard produces a second popstate.
+    // It must be handled even while the first Back event is still busy.
+    if (state.wavelengthGuard === true && wavelengthRestoringHome) {
+      wavelengthRestoringHome = false;
+      wavelengthBackBusy = false;
+      showCloseDialog();
+      return;
+    }
+
+    if (wavelengthBackBusy) return;
+    wavelengthBackBusy = true;
+
+    if (state.wavelengthGuard === true) {
+      wavelengthBackBusy = false;
+      return;
+    }
+
+    const screenName = state.wavelengthScreen || 'landing';
+    if (screenName === 'landing' || isHomeScreen()) {
+      // We reached the base Home entry by pressing Back. Restore the guard
+      // without adding history entries, then show the custom dialog.
+      wavelengthRestoringHome = true;
+      try {
+        history.forward();
+      } catch (_) {
+        wavelengthRestoringHome = false;
+        ensureHomeSentinel();
+        showCloseDialog();
+      }
+    } else {
+      // Back from any inner screen always returns to Home and re-arms exactly
+      // one sentinel.
+      goHomeFromInnerScreen();
+    }
+
+    setTimeout(() => { wavelengthBackBusy = false; }, 120);
   });
 
-  // script.js is loaded at the end of <body>, so arm the Home trap
-  // immediately. This removes the old 150ms window in which Android Back
-  // could escape before the guard existed.
+  // script.js is loaded at the end of <body>. Arm immediately, not after a
+  // timeout, so Android Back cannot beat initialization.
   armHomeBackGuard();
 
   // ---------- Sound + browser notification ----------
@@ -943,12 +977,14 @@
         scanLabel.innerHTML = 'Scanning frequencies<span class="dots"><span>.</span><span>.</span><span>.</span></span>';
         scanSub.textContent = 'Looking for someone else tuned in right now';
         showScreen('searching');
+        pushNavState('searching');
         break;
 
       case 'waiting_code':
         scanLabel.textContent = 'Waiting for your contact…';
         scanSub.textContent = `Share code ${msg.code} with them, or wait — they may already have it`;
         showScreen('searching');
+        pushNavState('searching');
         break;
 
       case 'matched':
@@ -1014,6 +1050,7 @@
             sendWs('close_thread');
             currentThreadContactId = null;
             showScreen('inbox');
+            pushNavState('inbox');
           }
           renderInboxList();
           updateInboxBadge();
@@ -1192,9 +1229,8 @@
     if (msgId) bubble.dataset.msgId = msgId;
 
     bubble.innerHTML = `<div class="wa-bubble__reply-placeholder"></div><span class="wa-bubble__text">${linked}</span><span class="wa-bubble__time">${formatBubbleTime(timestamp || Date.now())}</span>`;
-    decorateThreadBubble(bubble, meta, who);
-
     row.appendChild(bubble);
+    decorateThreadBubble(bubble, meta, who);
     threadRenderTarget.appendChild(row);
     if (threadRenderTarget === threadLog) threadLog.scrollTop = threadLog.scrollHeight;
   }
@@ -1229,8 +1265,8 @@
     bubble.appendChild(replyPlaceholder);
     bubble.appendChild(img);
     bubble.appendChild(timeMeta);
-    decorateThreadBubble(bubble, meta, who);
     row.appendChild(bubble);
+    decorateThreadBubble(bubble, meta, who);
     threadRenderTarget.appendChild(row);
     if (threadRenderTarget === threadLog) threadLog.scrollTop = threadLog.scrollHeight;
   }
@@ -1307,8 +1343,8 @@
     timeMeta.className = 'wa-bubble__time';
     bubble.appendChild(timeMeta);
 
-    decorateThreadBubble(bubble, fileMeta, who);
     row.appendChild(bubble);
+    decorateThreadBubble(bubble, fileMeta, who);
     threadRenderTarget.appendChild(row);
     if (threadRenderTarget === threadLog) threadLog.scrollTop = threadLog.scrollHeight;
   }
@@ -1443,6 +1479,7 @@
       </div>
       <span class="wa-bubble__time">${formatBubbleTime(timestamp || Date.now())}</span>
     `;
+    row.appendChild(bubble);
     decorateThreadBubble(bubble, meta, who);
 
     const audio = new Audio(audioData);
@@ -1480,7 +1517,6 @@
       delete audio.dataset.wlPlaying;
     });
 
-    row.appendChild(bubble);
     threadRenderTarget.appendChild(row);
     if (threadRenderTarget === threadLog) threadLog.scrollTop = threadLog.scrollHeight;
   }
@@ -1545,9 +1581,21 @@
     bubble.addEventListener('click', e => { if (e.target.closest('button')) return; if (window.matchMedia('(max-width: 520px)').matches) toggleBubbleActions(bubble); });
   }
 
+  function closeAllBubbleMenus(except = null) {
+    document.querySelectorAll('.wa-bubble.show-actions').forEach(b => {
+      if (b !== except) {
+        b.classList.remove('show-actions');
+        b.closest('.wa-bubble-row')?.classList.remove('wa-row--actions-open');
+      }
+    });
+  }
+
   function toggleBubbleActions(bubble) {
-    document.querySelectorAll('.wa-bubble.show-actions').forEach(b => { if (b !== bubble) b.classList.remove('show-actions'); });
-    bubble.classList.toggle('show-actions');
+    const opening = !bubble.classList.contains('show-actions');
+    closeAllBubbleMenus(bubble);
+    bubble.classList.toggle('show-actions', opening);
+    bubble.closest('.wa-bubble-row')?.classList.toggle('wa-row--actions-open', opening);
+    if (!opening) bubble.querySelector('.wa-reaction-picker')?.remove();
   }
 
   function setReplyFromBubble(bubble) {
@@ -1562,29 +1610,86 @@
 
   function clearReply() { selectedReply = null; replyComposer.classList.add('hidden'); }
 
+  function positionReactionPicker(picker, bubble) {
+    const rect = bubble.getBoundingClientRect();
+    const gap = 8;
+    const margin = 10;
+    picker.style.visibility = 'hidden';
+    picker.style.left = '0px';
+    picker.style.top = '0px';
+    requestAnimationFrame(() => {
+      const width = picker.offsetWidth;
+      const height = picker.offsetHeight;
+      const left = Math.max(margin, Math.min(
+        rect.left + (rect.width - width) / 2,
+        window.innerWidth - width - margin
+      ));
+      const above = rect.top - height - gap;
+      const below = rect.bottom + gap;
+      const top = above >= margin ? above : Math.min(below, window.innerHeight - height - margin);
+      picker.style.left = `${Math.round(left)}px`;
+      picker.style.top = `${Math.round(Math.max(margin, top))}px`;
+      picker.style.visibility = 'visible';
+    });
+  }
+
   function showReactionChoices(bubble) {
-    let picker = bubble.querySelector('.wa-reaction-picker');
-    if (picker) { picker.remove(); return; }
-    picker = document.createElement('div');
+    const existing = document.querySelector('.wa-reaction-picker');
+    if (existing) {
+      const same = existing.dataset.forMessage === bubble.dataset.msgId;
+      existing.remove();
+      if (same) return;
+    }
+
+    const picker = document.createElement('div');
     picker.className = 'wa-reaction-picker';
+    picker.dataset.forMessage = bubble.dataset.msgId || '';
+    picker.setAttribute('role', 'menu');
     ['❤️','😂','👍','😮','😢','🔥'].forEach(emoji => {
-      const b = document.createElement('button'); b.type = 'button'; b.textContent = emoji;
-      b.addEventListener('click', () => { sendWs('message_reaction', { id: bubble.dataset.msgId, emoji }); picker.remove(); });
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = emoji;
+      b.setAttribute('aria-label', `React with ${emoji}`);
+      b.addEventListener('click', (event) => {
+        event.stopPropagation();
+        sendWs('message_reaction', { id: bubble.dataset.msgId, emoji });
+        picker.remove();
+      });
       picker.appendChild(b);
     });
-    bubble.appendChild(picker);
+    document.body.appendChild(picker);
+    positionReactionPicker(picker, bubble);
+
+    const close = (event) => {
+      if (event?.type === 'scroll' || !picker.contains(event.target)) picker.remove();
+    };
+    document.addEventListener('click', close, { once: true, capture: true });
+    const reposition = () => {
+      if (document.body.contains(picker)) positionReactionPicker(picker, bubble);
+    };
+    window.addEventListener('resize', reposition, { once: true });
+    const log = bubble.closest('.wa-log');
+    if (log) log.addEventListener('scroll', () => picker.remove(), { once: true, passive: true });
   }
 
   function renderReactionBar(bubble, reactions) {
-    let bar = bubble.querySelector('.wa-reactions');
-    if (!reactions || !reactions.length) { if (bar) bar.remove(); return; }
+    const row = bubble.closest('.wa-bubble-row') || bubble;
+    let bar = Array.from(row.children).find(el => el.classList?.contains('wa-reactions'));
+    if (!reactions || !reactions.length) {
+      if (bar) bar.remove();
+      return;
+    }
     const counts = {};
     const mine = new Set();
     reactions.forEach(r => {
       counts[r.emoji] = (counts[r.emoji] || 0) + 1;
       if (r.userId === myDeviceId) mine.add(r.emoji);
     });
-    if (!bar) { bar = document.createElement('div'); bar.className = 'wa-reactions'; bubble.appendChild(bar); }
+    if (!bar) {
+      bar = document.createElement('div');
+      bar.className = `wa-reactions wa-reactions--${bubble.classList.contains('wa-bubble--me') ? 'me' : 'them'}`;
+      row.appendChild(bar);
+    }
     bar.innerHTML = Object.entries(counts).map(([e,c]) => {
       const active = mine.has(e) ? ' wa-reactions__item--mine' : '';
       return `<button type="button" class="wa-reactions__item${active}" data-reaction="${escapeHtml(e)}" aria-label="${mine.has(e) ? 'Remove' : 'React with'} ${escapeHtml(e)}">${e}${c > 1 ? `<b>${c}</b>` : ''}</button>`;
@@ -1619,7 +1724,11 @@
     const bubble = threadLog.querySelector(`[data-msg-id="${CSS.escape(String(id))}"]`);
     if (!bubble) return;
     bubble.classList.add('wa-bubble--deleted');
-    bubble.querySelectorAll('img,.wa-voice-bubble,.wa-message-actions,.wa-reactions,.wa-reaction-picker').forEach(el => el.remove());
+    bubble.classList.remove('show-actions');
+    bubble.closest('.wa-bubble-row')?.classList.remove('wa-row--actions-open');
+    bubble.closest('.wa-bubble-row')?.querySelector('.wa-reactions')?.remove();
+    document.querySelector(`.wa-reaction-picker[data-for-message="${CSS.escape(String(id))}"]`)?.remove();
+    bubble.querySelectorAll('img,.wa-voice-bubble,.wa-message-actions').forEach(el => el.remove());
     const text = bubble.querySelector('.wa-bubble__text');
     if (text) text.textContent = 'This message was deleted'; else { const t = document.createElement('span'); t.className='wa-bubble__text'; t.textContent='This message was deleted'; bubble.prepend(t); }
   }
@@ -2204,6 +2313,7 @@
     requestNotificationPermission();
     pendingConnectByCode = false;
     showScreen('searching');
+    pushNavState('searching');
     scanLabel.innerHTML = 'Scanning frequencies<span class="dots"><span>.</span><span>.</span><span>.</span></span>';
     scanSub.textContent = 'Looking for someone else tuned in right now';
     sendWs('find');
@@ -2222,6 +2332,7 @@
     if (!code) return;
     requestNotificationPermission();
     showScreen('searching');
+    pushNavState('searching');
     sendWs('connect_code', { code });
   });
 
@@ -2234,6 +2345,7 @@
     sendWs('leave');
     pendingConnectByCode = false;
     showScreen('landing');
+    pushNavState('landing');
   });
 
   // ---------- Chat actions (live random/paired chat) ----------
@@ -2272,6 +2384,7 @@
     emojiPanel.classList.add('hidden');
     sendWs('skip');
     showScreen('searching');
+    pushNavState('searching');
     scanLabel.innerHTML = 'Scanning frequencies<span class="dots"><span>.</span><span>.</span><span>.</span></span>';
     scanSub.textContent = 'Looking for someone else tuned in right now';
   });
@@ -2285,6 +2398,7 @@
     leftToast.classList.add('hidden');
     sendWs('find');
     showScreen('searching');
+    pushNavState('searching');
   });
 
   // ---------- Friend requests ----------
@@ -2318,10 +2432,12 @@
         pushNavState('landing');
       } else if (tab === 'inbox') {
         showScreen('inbox');
+        pushNavState('inbox');
         sendWs('get_contacts');
       } else if (tab === 'settings') {
         refreshSettingsProfile();
         showScreen('settings');
+        pushNavState('settings');
       }
     });
   });

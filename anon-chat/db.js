@@ -447,6 +447,8 @@ async function toggleReaction(messageId, userId, emoji) {
   try {
     const msg = await Message.findById(messageId);
     if (!msg) return null;
+    // Defense in depth: only the two participants in the message may react.
+    if (String(msg.fromId) !== String(userId) && String(msg.toId) !== String(userId)) return null;
     const idx = (msg.reactions || []).findIndex(r => r.userId === userId);
     if (idx >= 0 && msg.reactions[idx].emoji === emoji) msg.reactions.splice(idx, 1);
     else if (idx >= 0) msg.reactions[idx].emoji = emoji;

@@ -114,3 +114,13 @@ The private VAPID key must stay in Render environment variables and must not be 
 
 ## Avatar generation
 This build intentionally uses the existing built-in avatar set. AI avatar generation (Gemini/Nano Banana) is not included.
+
+## Audit Fixes in This Build
+- Rebuilt browser/Android Back handling around a single same-document history sentinel.
+- Added navigation state for searching, Inbox, Settings, Thread, and live Chat so Back from any inner screen returns to Home.
+- Reworked reaction rendering so reaction chips live outside the message bubble and cannot overlap adjacent messages.
+- Reaction picker is positioned as a fixed overlay instead of being clipped by the scrollable message area.
+- Reaction chips show the current user's active reaction and can be tapped again to remove it.
+- Added defense-in-depth participant authorization in the database reaction operation.
+- Deleted messages now also remove their external reaction chip and reaction picker.
+- No AI avatar generation is included in this build.
