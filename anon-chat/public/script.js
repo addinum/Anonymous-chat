@@ -28,8 +28,6 @@
   const scanLabel = document.getElementById('scanLabel');
   const scanSub = document.getElementById('scanSub');
   const contactsSection = document.getElementById('contactsSection');
-  const accountBar = document.getElementById('accountBar');
-  const accountBarText = document.getElementById('accountBarText');
   const settingsAccountBtn = document.getElementById('settingsAccountBtn');
   const settingsAccountAction = document.getElementById('settingsAccountAction');
   const settingsSignOutBtn = document.getElementById('settingsSignOutBtn');
@@ -74,8 +72,6 @@
   const friendCodeToast = document.getElementById('friendCodeToast');
   const friendCodeText = document.getElementById('friendCodeText');
 
-  const inboxBtn = document.getElementById('inboxBtn');
-  const inboxBadge = document.getElementById('inboxBadge');
   const inboxBackBtn = document.getElementById('inboxBackBtn');
   const inboxList = document.getElementById('inboxList');
   const avatarGrid = document.getElementById('avatarGrid');
@@ -121,6 +117,7 @@
   const activeCallName = document.getElementById('activeCallName');
   const activeCallStatus = document.getElementById('activeCallStatus');
   const callHangupBtn = document.getElementById('callHangupBtn');
+  const callBarQuickHangup = document.getElementById('callBarQuickHangup');
   const callBarMain = document.getElementById('callBarMain');
   const callBarControls = document.getElementById('callBarControls');
   const callDuration = document.getElementById('callDuration');
@@ -151,6 +148,7 @@
   let peerConnection = null;
   let localCallStream = null;
   let activeCallContactId = null;
+  let callNoAnswerTimer = null;
   let activeCallContactName = 'Contact';
   let activeCallContactAvatar = 'boy1';
   let pendingIncomingCall = null;
@@ -162,26 +160,27 @@
   let callDisconnectTimer = null;
   let callReconnectInProgress = false;
   let callStatsTimer = null;
-  let callAnswerTimeout = null;
   let callHistory = [];
   let activeCallDirection = 'outgoing';
   loadCallHistory();
-  const rtcIceServers = [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-    { urls: 'stun:stun.cloudflare.com:3478' }
-  ];
-  // Optional TURN credentials can be supplied by the server through /api/rtc-config.
-  // Calls still work with STUN when TURN is not configured.
-  let rtcConfig = {
-    iceServers: rtcIceServers,
-    iceCandidatePoolSize: 10,
+  const rtcConfig = {
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+      { urls: 'stun:stun.cloudflare.com:3478' },
+      // TURN relay: without this, calls between two phones on mobile data
+      // (very common on carrier-grade NAT, e.g. Jio/Airtel) can fail to find
+      // a direct path and produce garbled/partial audio instead of failing
+      // cleanly. This is a free, shared/rate-limited public relay (Open
+      // Relay Project) — fine for a small group, but swap in your own paid
+      // TURN credentials (Twilio, Xirsys, metered.ca) if usage grows.
+      { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
+      { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
+      { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' }
+    ],
     bundlePolicy: 'max-bundle',
     rtcpMuxPolicy: 'require'
   };
-  fetch('/api/rtc-config').then(r => r.ok ? r.json() : null).then(cfg => {
-    if (cfg?.iceServers?.length) rtcConfig = { ...rtcConfig, iceServers: [...rtcIceServers, ...cfg.iceServers] };
-  }).catch(() => {});
 
   // ---------- Persistent device identity (for the inbox feature only) ----------
   const DEVICE_ID_KEY = 'wavelength_device_id';
@@ -203,13 +202,10 @@
   let myAccountEmail = localStorage.getItem('wavelength_account_email') || null;
 
   // ---------- Account (optional email login on top of the anonymous system) ----------
-  function updateAccountBarDisplay() {
-    if (accountBarText) {
-      accountBarText.textContent = myAccountEmail
-        ? `👤 Signed in as ${myAccountEmail}`
-        : '🔐 Sign in to keep your inbox everywhere';
-    }
-  }
+  // Note: account status is shown in the Settings screen (settingsAccountAction/
+  // settingsAccountText below) — this function is a no-op kept only so its
+  // existing call sites don't need touching.
+  function updateAccountBarDisplay() {}
 
   function updateSettingsAccountUI() {
     if (!settingsAccountText) return;
@@ -256,7 +252,6 @@
     accountModal.classList.add('hidden');
   }
 
-  if (accountBar) accountBar.addEventListener('click', showAccountModal);
   if (settingsAccountBtn) settingsAccountBtn.addEventListener('click', showAccountModal);
   if (settingsAccountAction) settingsAccountAction.addEventListener('click', showAccountModal);
   accountModalClose.addEventListener('click', hideAccountModal);
@@ -335,7 +330,10 @@
       // account's canonical deviceId so its contacts/inbox come into view.
       myDeviceId = msg.deviceId;
       localStorage.setItem(DEVICE_ID_KEY, myDeviceId);
-      sendWs('identify', { deviceId: myDeviceId, name: nameInput.value.trim(), avatarId: getMyAvatarId() });
+      sendWs('identify', { deviceId: myDeviceId });
+      const name = nameInput.value.trim();
+      if (name) sendWs('set_name', { name });
+      sendWs('set_avatar', { avatarId: getMyAvatarId() });
       // The account may own a different canonical deviceId. Re-bind the
       // browser's push subscription to that device after the switch.
       if (Notification.permission === 'granted') {
@@ -496,14 +494,41 @@
   setInterval(() => { dialFreq.textContent = randomFreq(); }, 900);
 
   // ---------- Android / browser Back button ----------
-  // Use one same-document sentinel and restore it with history.forward().
-  // This is deliberately small and synchronous: Android Chrome must have the
-  // sentinel in its history stack before the user can press Back.
+  // App navigation uses one persistent browser-history guard:
+  //   Inner screen + Back -> Home
+  //   Home + Back -> Wavelength exit dialog
+  // The dialog's Yes button navigates to Google's homepage. It never
+  // attempts to force-close a normal Chrome tab.
   let wavelengthBackReady = false;
   let wavelengthCloseDialog = null;
   let wavelengthBackBusy = false;
-  let wavelengthRestoringHome = false;
-  let wavelengthCurrentScreen = 'landing';
+  let wavelengthRestoringHomeGuard = false;
+
+  function pushNavState(screenName) {
+    if (!wavelengthBackReady) return;
+    history.replaceState({ wavelengthScreen: screenName, wavelengthApp: true }, '', location.href);
+    ensureWavelengthBackGuard();
+  }
+
+  function pushChatHistoryState() {
+    if (!chatHistoryPushed) {
+      history.pushState({ wavelengthScreen: 'chat', wavelengthApp: true }, '', location.href);
+      chatHistoryPushed = true;
+    }
+  }
+
+  function exitChatToLanding() {
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      try { ws.send(JSON.stringify({ type: 'leave' })); } catch (_) {}
+    }
+    emojiPanel.classList.add('hidden');
+    showScreen('landing');
+    refreshInboxBadge();
+    if (wavelengthBackReady) {
+      history.replaceState({ wavelengthScreen: 'landing', wavelengthApp: true }, '', location.href);
+      ensureWavelengthBackGuard();
+    }
+  }
 
   function isHomeScreen() {
     return !!(screens.landing && !screens.landing.classList.contains('hidden'));
@@ -532,7 +557,6 @@
     const hide = () => {
       overlay.classList.remove('show');
       document.body.classList.remove('wavelength-dialog-open');
-      ensureHomeSentinel();
     };
 
     overlay.querySelector('.wavelength-close-no').addEventListener('click', hide);
@@ -540,8 +564,8 @@
       if (event.target === overlay) hide();
     });
     overlay.querySelector('.wavelength-close-yes').addEventListener('click', () => {
-      // Chrome will not allow a normal web page to close its own tab. The
-      // requested exit action is therefore navigation to the Chrome homepage.
+      // A normal user-opened Chrome tab cannot be force-closed by a website.
+      // Navigate to Chrome's Google homepage instead, as requested.
       window.location.assign('https://www.google.com/');
     });
 
@@ -555,90 +579,32 @@
     document.body.classList.add('wavelength-dialog-open');
   }
 
-  function ensureHomeSentinel() {
+  function ensureWavelengthBackGuard() {
     if (!wavelengthBackReady) return;
-    if (history.state?.wavelengthGuard === true) return;
-    history.pushState({ wavelengthGuard: true, wavelengthApp: true }, '', location.href);
+    if (!history.state || !history.state.wavelengthGuard) {
+      history.pushState({ wavelengthGuard: true, wavelengthApp: true }, '', location.href);
+    }
   }
 
-  function armHomeBackGuard() {
-    // Replace the current document entry with a known Wavelength base entry,
-    // then add exactly one guard entry. Do this synchronously at script load.
+  function prepareWavelengthBackGuard() {
+    if (wavelengthBackReady) return;
     wavelengthBackReady = true;
-    wavelengthRestoringHome = false;
-    wavelengthCurrentScreen = 'landing';
+
+    // Replace the current page entry with Home, then put one guard entry
+    // above it. Android Chrome Back will therefore fire popstate instead of
+    // immediately leaving the page.
     history.replaceState({ wavelengthScreen: 'landing', wavelengthApp: true }, '', location.href);
     history.pushState({ wavelengthGuard: true, wavelengthApp: true }, '', location.href);
   }
 
-  function pushNavState(screenName) {
-    if (!wavelengthBackReady) return;
-    if (wavelengthCurrentScreen === screenName && history.state?.wavelengthGuard === true) return;
-    // The current entry is the guard. Turn it into the current screen and add
-    // exactly one fresh guard. Repeated calls for the same screen are ignored
-    // so network events cannot stack invisible history entries.
-    wavelengthCurrentScreen = screenName;
-    history.replaceState({ wavelengthScreen: screenName, wavelengthApp: true }, '', location.href);
-    history.pushState({ wavelengthGuard: true, wavelengthApp: true }, '', location.href);
-  }
-
-  function pushChatHistoryState() {
-    if (!wavelengthBackReady || chatHistoryPushed) return;
-    pushNavState('chat');
-    chatHistoryPushed = true;
-  }
-
-  function exitChatToLanding() {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      try { ws.send(JSON.stringify({ type: 'leave' })); } catch (_) {}
-    }
-    emojiPanel.classList.add('hidden');
-    showScreen('landing');
-    refreshInboxBadge();
-    if (wavelengthBackReady) {
-      wavelengthCurrentScreen = 'landing';
-      history.replaceState({ wavelengthScreen: 'landing', wavelengthApp: true }, '', location.href);
-      ensureHomeSentinel();
-    }
-  }
-
-  function goHomeFromInnerScreen() {
-    if (screens.chat && !screens.chat.classList.contains('hidden')) {
-      chatHistoryPushed = false;
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        try { ws.send(JSON.stringify({ type: 'leave' })); } catch (_) {}
-      }
-      emojiPanel.classList.add('hidden');
-    }
-
-    if (screens.thread && !screens.thread.classList.contains('hidden')) {
-      if (mediaRecorder && mediaRecorder.state === 'recording') {
-        try { stopRecording(false); } catch (_) {}
-      }
-      if (ws && ws.readyState === WebSocket.OPEN) {
-        try { ws.send(JSON.stringify({ type: 'close_thread' })); } catch (_) {}
-      }
-      currentThreadContactId = null;
-      sendWs('get_contacts');
-    }
-
-    showScreen('landing');
-    refreshInboxBadge();
-    wavelengthCurrentScreen = 'landing';
-    history.replaceState({ wavelengthScreen: 'landing', wavelengthApp: true }, '', location.href);
-    ensureHomeSentinel();
-  }
-
-  window.addEventListener('popstate', (event) => {
+  window.addEventListener('popstate', () => {
     if (!wavelengthBackReady) return;
 
-    const state = event.state || {};
-
-    // history.forward() used for the Home guard produces a second popstate.
-    // It must be handled even while the first Back event is still busy.
-    if (state.wavelengthGuard === true && wavelengthRestoringHome) {
-      wavelengthRestoringHome = false;
-      wavelengthBackBusy = false;
+    // Home Back first lands on the Home entry after popping the guard.
+    // Move forward to the guard again, then show the dialog. The flag
+    // prevents the restoration popstate from running the normal handler.
+    if (wavelengthRestoringHomeGuard) {
+      wavelengthRestoringHomeGuard = false;
       showCloseDialog();
       return;
     }
@@ -646,35 +612,56 @@
     if (wavelengthBackBusy) return;
     wavelengthBackBusy = true;
 
-    if (state.wavelengthGuard === true) {
-      wavelengthBackBusy = false;
-      return;
-    }
+    // Decide from the actual visible screen, not from history.state. This
+    // makes the behavior reliable even when chat/thread entries exist.
+    const wasHome = isHomeScreen();
 
-    const screenName = state.wavelengthScreen || 'landing';
-    if (screenName === 'landing' || isHomeScreen()) {
-      // We reached the base Home entry by pressing Back. Restore the guard
-      // without adding history entries, then show the custom dialog.
-      wavelengthRestoringHome = true;
+    if (!wasHome) {
+      if (screens.chat && !screens.chat.classList.contains('hidden')) {
+        chatHistoryPushed = false;
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          try { ws.send(JSON.stringify({ type: 'leave' })); } catch (_) {}
+        }
+        emojiPanel.classList.add('hidden');
+      }
+
+      if (screens.thread && !screens.thread.classList.contains('hidden')) {
+        if (mediaRecorder && mediaRecorder.state === 'recording') {
+          try { stopRecording(false); } catch (_) {}
+        }
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          try { ws.send(JSON.stringify({ type: 'close_thread' })); } catch (_) {}
+        }
+        currentThreadContactId = null;
+        sendWs('get_contacts');
+      }
+
+      showScreen('landing');
+      refreshInboxBadge();
+      history.replaceState({ wavelengthScreen: 'landing', wavelengthApp: true }, '', location.href);
+      ensureWavelengthBackGuard();
+    } else {
+      // Home is the only place where Android Back opens the Wavelength dialog.
+      // Restore the guard entry first so the browser remains inside Wavelength.
+      wavelengthRestoringHomeGuard = true;
       try {
-        history.forward();
+        history.go(1);
       } catch (_) {
-        wavelengthRestoringHome = false;
-        ensureHomeSentinel();
+        wavelengthRestoringHomeGuard = false;
+        ensureWavelengthBackGuard();
         showCloseDialog();
       }
-    } else {
-      // Back from any inner screen always returns to Home and re-arms exactly
-      // one sentinel.
-      goHomeFromInnerScreen();
     }
 
     setTimeout(() => { wavelengthBackBusy = false; }, 120);
   });
 
-  // script.js is loaded at the end of <body>. Arm immediately, not after a
-  // timeout, so Android Back cannot beat initialization.
-  armHomeBackGuard();
+  document.addEventListener('DOMContentLoaded', () => {
+    setTimeout(prepareWavelengthBackGuard, 150);
+  });
+  if (document.readyState !== 'loading') {
+    setTimeout(prepareWavelengthBackGuard, 150);
+  }
 
   // ---------- Sound + browser notification ----------
   // ---------- Sound + browser notification ----------
@@ -860,12 +847,10 @@
 
     ws.addEventListener('open', () => {
       reconnectAttempts = 0;
-      ws.send(JSON.stringify({
-        type: 'identify',
-        deviceId: myDeviceId,
-        name: nameInput.value.trim(),
-        avatarId: getMyAvatarId()
-      }));
+      ws.send(JSON.stringify({ type: 'identify', deviceId: myDeviceId }));
+      const name = nameInput.value.trim();
+      if (name) ws.send(JSON.stringify({ type: 'set_name', name }));
+      ws.send(JSON.stringify({ type: 'set_avatar', avatarId: getMyAvatarId() }));
       ws.send(JSON.stringify({ type: 'whoami' }));
       refreshInboxBadge();
 
@@ -925,26 +910,18 @@
         }
         break;
 
-      case 'profile_result':
-        if (msg.name && nameInput) nameInput.value = msg.name;
-        if (msg.avatarId && isValidAvatarId(msg.avatarId)) localStorage.setItem(AVATAR_ID_KEY, msg.avatarId);
-        refreshSettingsProfile();
-        renderAvatarPicker();
-        break;
-
-      case 'profile_updated': {
-        const c = latestContacts.find(x => x.contactId === msg.deviceId);
-        if (c) {
-          c.name = msg.name || c.name;
-          c.avatar = msg.avatarId || c.avatar;
-          renderInboxList();
-          if (currentThreadContactId === msg.deviceId) {
-            threadWithLabel.textContent = c.name;
-            renderAvatarInto(threadAvatar, c.avatar);
-          }
+      case 'profile_restore':
+        // Fires after 'identify' if this deviceId has a saved profile —
+        // most relevant right after logging into an account on a new
+        // browser/device, so your name and avatar come back too, not
+        // just your contacts and inbox.
+        if (msg.name) {
+          nameInput.value = msg.name;
+        }
+        if (msg.avatar && isValidAvatarId(msg.avatar)) {
+          setMyAvatarId(msg.avatar);
         }
         break;
-      }
 
       case 'auth_success':
         handleAuthSuccess(msg);
@@ -977,14 +954,12 @@
         scanLabel.innerHTML = 'Scanning frequencies<span class="dots"><span>.</span><span>.</span><span>.</span></span>';
         scanSub.textContent = 'Looking for someone else tuned in right now';
         showScreen('searching');
-        pushNavState('searching');
         break;
 
       case 'waiting_code':
         scanLabel.textContent = 'Waiting for your contact…';
         scanSub.textContent = `Share code ${msg.code} with them, or wait — they may already have it`;
         showScreen('searching');
-        pushNavState('searching');
         break;
 
       case 'matched':
@@ -1032,6 +1007,20 @@
         break;
 
       // ---- Inbox events ----
+      case 'profile_updated': {
+        const index = latestContacts.findIndex(c => c.contactId === msg.deviceId);
+        if (index >= 0) {
+          latestContacts[index].name = msg.name || 'Stranger';
+          latestContacts[index].avatar = msg.avatar || 'boy1';
+          renderInboxList();
+          if (currentThreadContactId === msg.deviceId) {
+            threadWithLabel.textContent = latestContacts[index].name;
+            renderAvatarInto(threadAvatar, latestContacts[index].avatar);
+          }
+        }
+        break;
+      }
+
       case 'contacts_list':
         latestContacts = msg.contacts || [];
         latestContacts.forEach(c => presenceById.set(c.contactId, { online: !!c.online, lastSeenAt: c.lastSeenAt }));
@@ -1050,7 +1039,6 @@
             sendWs('close_thread');
             currentThreadContactId = null;
             showScreen('inbox');
-            pushNavState('inbox');
           }
           renderInboxList();
           updateInboxBadge();
@@ -1172,6 +1160,15 @@
         if (activeCallContactId === msg.fromId) endCall(false);
         break;
 
+      case 'call_unavailable':
+        if (activeCallContactId === msg.toDeviceId) {
+          clearTimeout(callNoAnswerTimer);
+          callNoAnswerTimer = null;
+          activeCallStatus.textContent = msg.reason === 'offline' ? 'Offline' : 'Unavailable';
+          setTimeout(() => endCall(false), 1400);
+        }
+        break;
+
       case 'inbox_typing':
         if (!screens.thread.classList.contains('hidden') && currentThreadContactId === msg.fromId) {
           showThreadTyping();
@@ -1229,8 +1226,9 @@
     if (msgId) bubble.dataset.msgId = msgId;
 
     bubble.innerHTML = `<div class="wa-bubble__reply-placeholder"></div><span class="wa-bubble__text">${linked}</span><span class="wa-bubble__time">${formatBubbleTime(timestamp || Date.now())}</span>`;
-    row.appendChild(bubble);
     decorateThreadBubble(bubble, meta, who);
+
+    row.appendChild(bubble);
     threadRenderTarget.appendChild(row);
     if (threadRenderTarget === threadLog) threadLog.scrollTop = threadLog.scrollHeight;
   }
@@ -1265,8 +1263,8 @@
     bubble.appendChild(replyPlaceholder);
     bubble.appendChild(img);
     bubble.appendChild(timeMeta);
-    row.appendChild(bubble);
     decorateThreadBubble(bubble, meta, who);
+    row.appendChild(bubble);
     threadRenderTarget.appendChild(row);
     if (threadRenderTarget === threadLog) threadLog.scrollTop = threadLog.scrollHeight;
   }
@@ -1343,8 +1341,8 @@
     timeMeta.className = 'wa-bubble__time';
     bubble.appendChild(timeMeta);
 
-    row.appendChild(bubble);
     decorateThreadBubble(bubble, fileMeta, who);
+    row.appendChild(bubble);
     threadRenderTarget.appendChild(row);
     if (threadRenderTarget === threadLog) threadLog.scrollTop = threadLog.scrollHeight;
   }
@@ -1479,7 +1477,6 @@
       </div>
       <span class="wa-bubble__time">${formatBubbleTime(timestamp || Date.now())}</span>
     `;
-    row.appendChild(bubble);
     decorateThreadBubble(bubble, meta, who);
 
     const audio = new Audio(audioData);
@@ -1517,6 +1514,7 @@
       delete audio.dataset.wlPlaying;
     });
 
+    row.appendChild(bubble);
     threadRenderTarget.appendChild(row);
     if (threadRenderTarget === threadLog) threadLog.scrollTop = threadLog.scrollHeight;
   }
@@ -1581,21 +1579,9 @@
     bubble.addEventListener('click', e => { if (e.target.closest('button')) return; if (window.matchMedia('(max-width: 520px)').matches) toggleBubbleActions(bubble); });
   }
 
-  function closeAllBubbleMenus(except = null) {
-    document.querySelectorAll('.wa-bubble.show-actions').forEach(b => {
-      if (b !== except) {
-        b.classList.remove('show-actions');
-        b.closest('.wa-bubble-row')?.classList.remove('wa-row--actions-open');
-      }
-    });
-  }
-
   function toggleBubbleActions(bubble) {
-    const opening = !bubble.classList.contains('show-actions');
-    closeAllBubbleMenus(bubble);
-    bubble.classList.toggle('show-actions', opening);
-    bubble.closest('.wa-bubble-row')?.classList.toggle('wa-row--actions-open', opening);
-    if (!opening) bubble.querySelector('.wa-reaction-picker')?.remove();
+    document.querySelectorAll('.wa-bubble.show-actions').forEach(b => { if (b !== bubble) b.classList.remove('show-actions'); });
+    bubble.classList.toggle('show-actions');
   }
 
   function setReplyFromBubble(bubble) {
@@ -1610,96 +1596,26 @@
 
   function clearReply() { selectedReply = null; replyComposer.classList.add('hidden'); }
 
-  function positionReactionPicker(picker, bubble) {
-    const rect = bubble.getBoundingClientRect();
-    const gap = 8;
-    const margin = 10;
-    picker.style.visibility = 'hidden';
-    picker.style.left = '0px';
-    picker.style.top = '0px';
-    requestAnimationFrame(() => {
-      const width = picker.offsetWidth;
-      const height = picker.offsetHeight;
-      const left = Math.max(margin, Math.min(
-        rect.left + (rect.width - width) / 2,
-        window.innerWidth - width - margin
-      ));
-      const above = rect.top - height - gap;
-      const below = rect.bottom + gap;
-      const top = above >= margin ? above : Math.min(below, window.innerHeight - height - margin);
-      picker.style.left = `${Math.round(left)}px`;
-      picker.style.top = `${Math.round(Math.max(margin, top))}px`;
-      picker.style.visibility = 'visible';
-    });
-  }
-
   function showReactionChoices(bubble) {
-    const existing = document.querySelector('.wa-reaction-picker');
-    if (existing) {
-      const same = existing.dataset.forMessage === bubble.dataset.msgId;
-      existing.remove();
-      if (same) return;
-    }
-
-    const picker = document.createElement('div');
+    let picker = bubble.querySelector('.wa-reaction-picker');
+    if (picker) { picker.remove(); return; }
+    picker = document.createElement('div');
     picker.className = 'wa-reaction-picker';
-    picker.dataset.forMessage = bubble.dataset.msgId || '';
-    picker.setAttribute('role', 'menu');
     ['❤️','😂','👍','😮','😢','🔥'].forEach(emoji => {
-      const b = document.createElement('button');
-      b.type = 'button';
-      b.textContent = emoji;
-      b.setAttribute('aria-label', `React with ${emoji}`);
-      b.addEventListener('click', (event) => {
-        event.stopPropagation();
-        sendWs('message_reaction', { id: bubble.dataset.msgId, emoji });
-        picker.remove();
-      });
+      const b = document.createElement('button'); b.type = 'button'; b.textContent = emoji;
+      b.addEventListener('click', () => { sendWs('message_reaction', { id: bubble.dataset.msgId, emoji }); picker.remove(); });
       picker.appendChild(b);
     });
-    document.body.appendChild(picker);
-    positionReactionPicker(picker, bubble);
-
-    const close = (event) => {
-      if (event?.type === 'scroll' || !picker.contains(event.target)) picker.remove();
-    };
-    document.addEventListener('click', close, { once: true, capture: true });
-    const reposition = () => {
-      if (document.body.contains(picker)) positionReactionPicker(picker, bubble);
-    };
-    window.addEventListener('resize', reposition, { once: true });
-    const log = bubble.closest('.wa-log');
-    if (log) log.addEventListener('scroll', () => picker.remove(), { once: true, passive: true });
+    bubble.appendChild(picker);
   }
 
   function renderReactionBar(bubble, reactions) {
-    const row = bubble.closest('.wa-bubble-row') || bubble;
-    let bar = Array.from(row.children).find(el => el.classList?.contains('wa-reactions'));
-    if (!reactions || !reactions.length) {
-      if (bar) bar.remove();
-      return;
-    }
+    let bar = bubble.querySelector('.wa-reactions');
+    if (!reactions || !reactions.length) { if (bar) bar.remove(); return; }
     const counts = {};
-    const mine = new Set();
-    reactions.forEach(r => {
-      counts[r.emoji] = (counts[r.emoji] || 0) + 1;
-      if (r.userId === myDeviceId) mine.add(r.emoji);
-    });
-    if (!bar) {
-      bar = document.createElement('div');
-      bar.className = `wa-reactions wa-reactions--${bubble.classList.contains('wa-bubble--me') ? 'me' : 'them'}`;
-      row.appendChild(bar);
-    }
-    bar.innerHTML = Object.entries(counts).map(([e,c]) => {
-      const active = mine.has(e) ? ' wa-reactions__item--mine' : '';
-      return `<button type="button" class="wa-reactions__item${active}" data-reaction="${escapeHtml(e)}" aria-label="${mine.has(e) ? 'Remove' : 'React with'} ${escapeHtml(e)}">${e}${c > 1 ? `<b>${c}</b>` : ''}</button>`;
-    }).join('');
-    bar.querySelectorAll('[data-reaction]').forEach(btn => {
-      btn.addEventListener('click', (event) => {
-        event.stopPropagation();
-        sendWs('message_reaction', { id: bubble.dataset.msgId, emoji: btn.dataset.reaction });
-      });
-    });
+    reactions.forEach(r => counts[r.emoji] = (counts[r.emoji] || 0) + 1);
+    if (!bar) { bar = document.createElement('div'); bar.className = 'wa-reactions'; bubble.appendChild(bar); }
+    bar.innerHTML = Object.entries(counts).map(([e,c]) => `<span>${e}${c > 1 ? `<b>${c}</b>` : ''}</span>`).join('');
   }
 
   function updateMessageStatus(id, status) {
@@ -1724,11 +1640,7 @@
     const bubble = threadLog.querySelector(`[data-msg-id="${CSS.escape(String(id))}"]`);
     if (!bubble) return;
     bubble.classList.add('wa-bubble--deleted');
-    bubble.classList.remove('show-actions');
-    bubble.closest('.wa-bubble-row')?.classList.remove('wa-row--actions-open');
-    bubble.closest('.wa-bubble-row')?.querySelector('.wa-reactions')?.remove();
-    document.querySelector(`.wa-reaction-picker[data-for-message="${CSS.escape(String(id))}"]`)?.remove();
-    bubble.querySelectorAll('img,.wa-voice-bubble,.wa-message-actions').forEach(el => el.remove());
+    bubble.querySelectorAll('img,.wa-voice-bubble,.wa-message-actions,.wa-reactions,.wa-reaction-picker').forEach(el => el.remove());
     const text = bubble.querySelector('.wa-bubble__text');
     if (text) text.textContent = 'This message was deleted'; else { const t = document.createElement('span'); t.className='wa-bubble__text'; t.textContent='This message was deleted'; bubble.prepend(t); }
   }
@@ -1820,10 +1732,6 @@
   // ---------- Inbox rendering ----------
   function updateInboxBadge() {
     const totalUnread = latestContacts.reduce((sum, c) => sum + (c.unreadCount || 0), 0);
-    if (inboxBadge) {
-      inboxBadge.textContent = totalUnread > 99 ? '99+' : String(totalUnread);
-      inboxBadge.classList.toggle('hidden', totalUnread === 0);
-    }
     if (bottomInboxBadge) {
       bottomInboxBadge.textContent = totalUnread > 99 ? '99+' : String(totalUnread);
       bottomInboxBadge.classList.toggle('hidden', totalUnread === 0);
@@ -1954,8 +1862,6 @@
   }
 
   function hideCallUI() {
-    clearTimeout(callAnswerTimeout);
-    callAnswerTimeout = null;
     incomingCallModal.classList.add('hidden');
     activeCallBar.classList.add('hidden');
     activeCallBar.classList.remove('expanded');
@@ -1965,8 +1871,8 @@
   }
 
   function setCallConnected() {
-    clearTimeout(callAnswerTimeout);
-    callAnswerTimeout = null;
+    clearTimeout(callNoAnswerTimer);
+    callNoAnswerTimer = null;
     activeCallStatus.textContent = 'Connected';
     startCallTimer();
     startCallQualityMonitor();
@@ -2183,13 +2089,16 @@
         fromName: activeCallContactName,
         fromAvatar: getMyAvatarId()
       });
-      clearTimeout(callAnswerTimeout);
-      callAnswerTimeout = setTimeout(() => {
-        if (activeCallContactId && !callStartedAt) {
+
+      // If nobody answers within 35s, stop trying instead of showing
+      // "Calling…" forever with no feedback.
+      clearTimeout(callNoAnswerTimer);
+      callNoAnswerTimer = setTimeout(() => {
+        if (activeCallContactId && activeCallStatus.textContent !== 'Connected') {
           activeCallStatus.textContent = 'No answer';
-          setTimeout(() => { if (activeCallContactId && !callStartedAt) endCall(true); }, 900);
+          setTimeout(() => endCall(true), 1200);
         }
-      }, 40000);
+      }, 35000);
     } catch (err) {
       console.error('startCall failed:', err);
       endCall(false);
@@ -2225,10 +2134,10 @@
   }
 
   function endCall(notify = true) {
-    clearTimeout(callAnswerTimeout);
-    callAnswerTimeout = null;
     clearTimeout(callDisconnectTimer);
     callDisconnectTimer = null;
+    clearTimeout(callNoAnswerTimer);
+    callNoAnswerTimer = null;
     callReconnectInProgress = false;
     pendingIceCandidates = [];
     const contactId = activeCallContactId;
@@ -2313,7 +2222,6 @@
     requestNotificationPermission();
     pendingConnectByCode = false;
     showScreen('searching');
-    pushNavState('searching');
     scanLabel.innerHTML = 'Scanning frequencies<span class="dots"><span>.</span><span>.</span><span>.</span></span>';
     scanSub.textContent = 'Looking for someone else tuned in right now';
     sendWs('find');
@@ -2332,7 +2240,6 @@
     if (!code) return;
     requestNotificationPermission();
     showScreen('searching');
-    pushNavState('searching');
     sendWs('connect_code', { code });
   });
 
@@ -2345,7 +2252,6 @@
     sendWs('leave');
     pendingConnectByCode = false;
     showScreen('landing');
-    pushNavState('landing');
   });
 
   // ---------- Chat actions (live random/paired chat) ----------
@@ -2384,7 +2290,6 @@
     emojiPanel.classList.add('hidden');
     sendWs('skip');
     showScreen('searching');
-    pushNavState('searching');
     scanLabel.innerHTML = 'Scanning frequencies<span class="dots"><span>.</span><span>.</span><span>.</span></span>';
     scanSub.textContent = 'Looking for someone else tuned in right now';
   });
@@ -2398,7 +2303,6 @@
     leftToast.classList.add('hidden');
     sendWs('find');
     showScreen('searching');
-    pushNavState('searching');
   });
 
   // ---------- Friend requests ----------
@@ -2418,26 +2322,17 @@
   });
 
   // ---------- Inbox / Thread navigation ----------
-  if (inboxBtn) inboxBtn.addEventListener('click', () => {
-    showScreen('inbox');
-    pushNavState('inbox');
-    sendWs('get_contacts');
-  });
-
   if (bottomNav) bottomNav.querySelectorAll('.bottom-nav__item').forEach((item) => {
     item.addEventListener('click', () => {
       const tab = item.dataset.tab;
       if (tab === 'landing') {
         showScreen('landing');
-        pushNavState('landing');
       } else if (tab === 'inbox') {
         showScreen('inbox');
-        pushNavState('inbox');
         sendWs('get_contacts');
       } else if (tab === 'settings') {
         refreshSettingsProfile();
         showScreen('settings');
-        pushNavState('settings');
       }
     });
   });
@@ -2676,21 +2571,10 @@
   callAcceptBtn.addEventListener('click', acceptIncomingCall);
   callDeclineBtn.addEventListener('click', declineIncomingCall);
   callHangupBtn.addEventListener('click', (event) => { event.stopPropagation(); endCall(true); });
-  const callBarHangupBtn = document.getElementById('callBarHangupBtn');
-  if (callBarHangupBtn) callBarHangupBtn.addEventListener('click', (event) => { event.stopPropagation(); endCall(true); });
-  function toggleActiveCallBar() {
+  callBarQuickHangup.addEventListener('click', (event) => { event.stopPropagation(); endCall(true); });
+  callBarMain.addEventListener('click', () => {
     const expanded = activeCallBar.classList.toggle('expanded');
     callBarMain.setAttribute('aria-expanded', String(expanded));
-  }
-  callBarMain.addEventListener('click', (event) => {
-    if (event.target.closest('#callBarHangupBtn')) return;
-    toggleActiveCallBar();
-  });
-  callBarMain.addEventListener('keydown', (event) => {
-    if (event.key === 'Enter' || event.key === ' ') {
-      event.preventDefault();
-      toggleActiveCallBar();
-    }
   });
   callBarControls.addEventListener('click', (event) => event.stopPropagation());
   callMuteBtn.addEventListener('click', toggleCallMute);

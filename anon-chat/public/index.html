@@ -331,18 +331,18 @@
 </div>
 
 <div id="activeCallBar" class="call-bar hidden" aria-label="Active call">
-  <div id="callBarMain" class="call-bar__main" role="button" tabindex="0" aria-expanded="false" aria-label="Expand active call">
-    <div class="call-bar__info">
-      <div class="call-bar__avatar" id="activeCallAvatar">?</div>
-      <div class="call-bar__details">
-        <strong id="activeCallName">Contact</strong>
-        <span id="activeCallStatus">Calling…</span>
+  <div class="call-bar__row">
+    <button type="button" id="callBarMain" class="call-bar__main" aria-expanded="false">
+      <div class="call-bar__info">
+        <div class="call-bar__avatar" id="activeCallAvatar">?</div>
+        <div class="call-bar__details">
+          <strong id="activeCallName">Contact</strong>
+          <span id="activeCallStatus">Calling…</span>
+        </div>
       </div>
-    </div>
-    <div class="call-bar__main-actions">
-      <button type="button" id="callBarHangupBtn" class="call-bar__hangup" aria-label="End call" title="End call">☎</button>
       <span class="call-bar__chevron" aria-hidden="true">⌃</span>
-    </div>
+    </button>
+    <button type="button" id="callBarQuickHangup" class="call-bar__quick-hangup" title="End call" aria-label="End call">☎</button>
   </div>
   <div class="call-bar__controls" id="callBarControls">
     <div class="call-stat">

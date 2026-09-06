@@ -7,13 +7,6 @@
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 
-const profileSchema = new mongoose.Schema({
-  deviceId: { type: String, required: true, unique: true, index: true },
-  name: { type: String, default: 'Stranger' },
-  avatarId: { type: String, default: 'boy1' },
-  updatedAt: { type: Date, default: Date.now },
-});
-
 const accountSchema = new mongoose.Schema({
   email: { type: String, required: true, unique: true, lowercase: true, trim: true },
   passwordHash: { type: String, required: true },
@@ -62,8 +55,15 @@ const messageSchema = new mongoose.Schema({
   }],
 });
 
-const Profile = mongoose.model('Profile', profileSchema);
 const Account = mongoose.model('Account', accountSchema);
+const profileSchema = new mongoose.Schema({
+  deviceId: { type: String, required: true, unique: true, index: true },
+  name: { type: String, default: 'Stranger' },
+  avatar: { type: String, default: 'boy1' },
+  updatedAt: { type: Date, default: Date.now },
+});
+
+const Profile = mongoose.model('Profile', profileSchema);
 const Contact = mongoose.model('Contact', contactSchema);
 const Message = mongoose.model('Message', messageSchema);
 
@@ -139,38 +139,6 @@ async function verifyLogin(email, password) {
   }
 }
 
-
-async function upsertProfile(deviceId, name, avatarId) {
-  if (!isReady() || !deviceId) return null;
-  try {
-    const cleanName = String(name || 'Stranger').slice(0, 24).trim() || 'Stranger';
-    const valid = new Set(['boy1','boy2','boy3','boy4','boy5','girl1','girl2','girl3','girl4','girl5']);
-    const cleanAvatar = valid.has(String(avatarId)) ? String(avatarId) : 'boy1';
-    return await Profile.findOneAndUpdate(
-      { deviceId },
-      { $set: { name: cleanName, avatarId: cleanAvatar, updatedAt: new Date() } },
-      { upsert: true, new: true, setDefaultsOnInsert: true }
-    ).lean();
-  } catch (err) { console.error('upsertProfile failed:', err.message); return null; }
-}
-
-async function getProfile(deviceId) {
-  if (!isReady() || !deviceId) return null;
-  try { return await Profile.findOne({ deviceId }).lean(); }
-  catch (err) { console.error('getProfile failed:', err.message); return null; }
-}
-
-async function refreshContactProfile(deviceId, name, avatarId) {
-  if (!isReady() || !deviceId) return false;
-  try {
-    await Contact.updateMany(
-      { contactId: deviceId },
-      { $set: { contactName: name || 'Stranger', contactAvatar: avatarId || 'boy1', lastSeenAt: new Date() } }
-    );
-    return true;
-  } catch (err) { console.error('refreshContactProfile failed:', err.message); return false; }
-}
-
 async function getAccountByDeviceId(deviceId) {
   if (!isReady() || !deviceId) return null;
   try {
@@ -222,6 +190,32 @@ async function areContacts(idA, idB) {
     console.error('areContacts failed:', err.message);
     return false;
   }
+}
+
+// ---- Profiles ----
+async function saveProfile(deviceId, name, avatar) {
+  if (!isReady() || !deviceId) return false;
+  try {
+    const cleanName = String(name || '').slice(0, 24).trim() || 'Stranger';
+    const cleanAvatar = String(avatar || 'boy1').slice(0, 8).trim() || 'boy1';
+    await Profile.findOneAndUpdate(
+      { deviceId },
+      { $set: { name: cleanName, avatar: cleanAvatar, updatedAt: new Date() } },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+    return true;
+  } catch (err) {
+    console.error('saveProfile failed:', err.message);
+    return false;
+  }
+}
+
+async function getProfile(deviceId) {
+  if (!isReady() || !deviceId) return null;
+  try {
+    const p = await Profile.findOne({ deviceId }).lean();
+    return p ? { name: p.name || 'Stranger', avatar: p.avatar || 'boy1', updatedAt: p.updatedAt } : null;
+  } catch (err) { return null; }
 }
 
 // ---- Contacts ----
@@ -295,9 +289,11 @@ async function getContacts(ownerId) {
     const contacts = await Contact.find({ ownerId }).lean();
     const results = [];
     for (const c of contacts) {
-      const profile = await Profile.findOne({ deviceId: c.contactId }).lean();
-      const contactName = profile?.name || c.contactName || 'Stranger';
-      const contactAvatar = profile?.avatarId || c.contactAvatar || 'boy1';
+      const liveProfile = await getProfile(c.contactId);
+      if (liveProfile) {
+        c.contactName = liveProfile.name;
+        c.contactAvatar = liveProfile.avatar;
+      }
       const unreadCount = await Message.countDocuments({
         fromId: c.contactId,
         toId: ownerId,
@@ -311,8 +307,8 @@ async function getContacts(ownerId) {
       }).sort({ createdAt: -1 }).lean();
       results.push({
         contactId: c.contactId,
-        name: contactName,
-        avatar: contactAvatar,
+        name: c.contactName,
+        avatar: c.contactAvatar || 'boy1',
         unreadCount,
         lastMessage: lastMsg ? (lastMsg.msgType === 'voice' ? '🎤 Voice message' : lastMsg.msgType === 'gif' ? '🎞️ GIF' : lastMsg.msgType === 'file' ? `📎 ${lastMsg.fileName || 'File'}` : lastMsg.text) : null,
         lastAt: lastMsg ? lastMsg.createdAt : c.createdAt,
@@ -436,19 +432,13 @@ async function deleteMessage(messageId, ownerId) {
   catch (err) { console.error('deleteMessage failed:', err.message); return null; }
 }
 
-async function getMessageById(messageId) {
-  if (!isReady() || !messageId) return null;
-  try { return await Message.findById(messageId).lean(); }
-  catch (err) { return null; }
-}
-
 async function toggleReaction(messageId, userId, emoji) {
   if (!isReady()) return null;
   try {
     const msg = await Message.findById(messageId);
     if (!msg) return null;
-    // Defense in depth: only the two participants in the message may react.
-    if (String(msg.fromId) !== String(userId) && String(msg.toId) !== String(userId)) return null;
+    // Only the two people in this conversation may react to it.
+    if (msg.fromId !== userId && msg.toId !== userId) return null;
     const idx = (msg.reactions || []).findIndex(r => r.userId === userId);
     if (idx >= 0 && msg.reactions[idx].emoji === emoji) msg.reactions.splice(idx, 1);
     else if (idx >= 0) msg.reactions[idx].emoji = emoji;
@@ -466,14 +456,13 @@ async function touchContactLastSeen(deviceId) {
 
 module.exports = {
   areContacts,
+  saveProfile,
+  getProfile,
   connect,
   isReady,
   createAccount,
   verifyLogin,
   getAccountByDeviceId,
-  upsertProfile,
-  getProfile,
-  refreshContactProfile,
   updateAccount,
   saveContactPair,
   getContacts,
@@ -493,6 +482,5 @@ module.exports = {
   editMessage,
   deleteMessage,
   toggleReaction,
-  getMessageById,
   touchContactLastSeen,
 };
