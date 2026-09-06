@@ -72,6 +72,25 @@ const MIME = {
 };
 
 const server = http.createServer((req, res) => {
+  if (req.method === 'GET' && new URL(req.url, `http://${req.headers.host || 'localhost'}`).pathname === '/api/rtc-config') {
+    const turnUrl = process.env.TURN_URL || '';
+    const turnUsername = process.env.TURN_USERNAME || '';
+    const turnCredential = process.env.TURN_CREDENTIAL || '';
+    const iceServers = [];
+    if (turnUrl && turnUsername && turnCredential) {
+      iceServers.push({ urls: turnUrl, username: turnUsername, credential: turnCredential });
+    } else {
+      // Public Open Relay fallback. For production reliability, configure a
+      // dedicated TURN provider through TURN_URL/TURN_USERNAME/TURN_CREDENTIAL.
+      iceServers.push(
+        { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
+        { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
+        { urls: 'turns:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' }
+      );
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+    return res.end(JSON.stringify({ iceServers }));
+  }
   if (req.method === 'GET' && new URL(req.url, `http://${req.headers.host || 'localhost'}`).pathname === '/api/push/status') {
     res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
     return res.end(JSON.stringify({
@@ -249,8 +268,17 @@ wss.on('connection', (ws) => {
         if (!deviceId) return;
         wsDeviceId.set(ws, deviceId);
         deviceOnline.set(deviceId, ws);
-        // Tell this user's contacts that they are online.
-        db.getContacts(deviceId).then(contacts => {
+        db.getProfile(deviceId).then(async (profile) => {
+          if (profile) {
+            names.set(ws, profile.name || 'Stranger');
+            avatars.set(ws, profile.avatarId || 'boy1');
+          } else {
+            names.set(ws, String(msg.name || 'Stranger').slice(0, 24).trim() || 'Stranger');
+            avatars.set(ws, ['boy1','boy2','boy3','boy4','boy5','girl1','girl2','girl3','girl4','girl5'].includes(msg.avatarId) ? msg.avatarId : 'boy1');
+            await db.upsertProfile(deviceId, names.get(ws), avatars.get(ws));
+          }
+          send(ws, 'profile_result', { name: names.get(ws) || 'Stranger', avatarId: avatars.get(ws) || 'boy1' });
+          const contacts = await db.getContacts(deviceId);
           contacts.forEach(c => {
             const contactWs = deviceOnline.get(c.contactId);
             if (contactWs) send(contactWs, 'presence', { deviceId, online: true });
@@ -311,6 +339,15 @@ wss.on('connection', (ws) => {
       case 'set_name': {
         const clean = String(msg.name || '').slice(0, 24).trim();
         names.set(ws, clean || 'Stranger');
+        const myId = wsDeviceId.get(ws);
+        if (myId) {
+          db.upsertProfile(myId, names.get(ws), avatars.get(ws) || 'boy1');
+          db.refreshContactProfile(myId, names.get(ws), avatars.get(ws) || 'boy1');
+          db.getContacts(myId).then(contacts => contacts.forEach(c => {
+            const contactWs = deviceOnline.get(c.contactId);
+            if (contactWs) send(contactWs, 'profile_updated', { deviceId: myId, name: names.get(ws), avatarId: avatars.get(ws) || 'boy1' });
+          })).catch(() => {});
+        }
         break;
       }
 
@@ -318,6 +355,15 @@ wss.on('connection', (ws) => {
         const avatarId = String(msg.avatarId || '').slice(0, 8).trim();
         const VALID_AVATAR_IDS = new Set(['boy1', 'boy2', 'boy3', 'boy4', 'boy5', 'girl1', 'girl2', 'girl3', 'girl4', 'girl5']);
         avatars.set(ws, VALID_AVATAR_IDS.has(avatarId) ? avatarId : 'boy1');
+        const myId = wsDeviceId.get(ws);
+        if (myId) {
+          db.upsertProfile(myId, names.get(ws) || 'Stranger', avatars.get(ws));
+          db.refreshContactProfile(myId, names.get(ws) || 'Stranger', avatars.get(ws));
+          db.getContacts(myId).then(contacts => contacts.forEach(c => {
+            const contactWs = deviceOnline.get(c.contactId);
+            if (contactWs) send(contactWs, 'profile_updated', { deviceId: myId, name: names.get(ws) || 'Stranger', avatarId: avatars.get(ws) });
+          })).catch(() => {});
+        }
         break;
       }
 
@@ -549,6 +595,8 @@ wss.on('connection', (ws) => {
         const id = String(msg.id || '');
         const emoji = String(msg.emoji || '').slice(0, 4);
         if (!myId || !id || !emoji) break;
+        const reactionMsg = await db.getMessageById(id);
+        if (!reactionMsg || (reactionMsg.fromId !== myId && reactionMsg.toId !== myId)) break;
         const updated = await db.toggleReaction(id, myId, emoji);
         if (!updated) break;
         const payload = { id, reactions: updated.reactions || [] };

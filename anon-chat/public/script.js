@@ -162,18 +162,26 @@
   let callDisconnectTimer = null;
   let callReconnectInProgress = false;
   let callStatsTimer = null;
+  let callAnswerTimeout = null;
   let callHistory = [];
   let activeCallDirection = 'outgoing';
   loadCallHistory();
-  const rtcConfig = {
-    iceServers: [
-      { urls: 'stun:stun.l.google.com:19302' },
-      { urls: 'stun:stun1.l.google.com:19302' },
-      { urls: 'stun:stun.cloudflare.com:3478' }
-    ],
+  const rtcIceServers = [
+    { urls: 'stun:stun.l.google.com:19302' },
+    { urls: 'stun:stun1.l.google.com:19302' },
+    { urls: 'stun:stun.cloudflare.com:3478' }
+  ];
+  // Optional TURN credentials can be supplied by the server through /api/rtc-config.
+  // Calls still work with STUN when TURN is not configured.
+  let rtcConfig = {
+    iceServers: rtcIceServers,
+    iceCandidatePoolSize: 10,
     bundlePolicy: 'max-bundle',
     rtcpMuxPolicy: 'require'
   };
+  fetch('/api/rtc-config').then(r => r.ok ? r.json() : null).then(cfg => {
+    if (cfg?.iceServers?.length) rtcConfig = { ...rtcConfig, iceServers: [...rtcIceServers, ...cfg.iceServers] };
+  }).catch(() => {});
 
   // ---------- Persistent device identity (for the inbox feature only) ----------
   const DEVICE_ID_KEY = 'wavelength_device_id';
@@ -327,10 +335,7 @@
       // account's canonical deviceId so its contacts/inbox come into view.
       myDeviceId = msg.deviceId;
       localStorage.setItem(DEVICE_ID_KEY, myDeviceId);
-      sendWs('identify', { deviceId: myDeviceId });
-      const name = nameInput.value.trim();
-      if (name) sendWs('set_name', { name });
-      sendWs('set_avatar', { avatarId: getMyAvatarId() });
+      sendWs('identify', { deviceId: myDeviceId, name: nameInput.value.trim(), avatarId: getMyAvatarId() });
       // The account may own a different canonical deviceId. Re-bind the
       // browser's push subscription to that device after the switch.
       if (Notification.permission === 'granted') {
@@ -585,12 +590,11 @@
   function prepareWavelengthBackGuard() {
     if (wavelengthBackReady) return;
     wavelengthBackReady = true;
-
-    // Replace the current page entry with Home, then put one guard entry
-    // above it. Android Chrome Back will therefore fire popstate instead of
-    // immediately leaving the page.
+    // Create a dedicated Home entry plus a guard entry immediately. The
+    // guard is recreated after every Back event so Android Chrome remains
+    // inside Wavelength instead of leaving the page.
     history.replaceState({ wavelengthScreen: 'landing', wavelengthApp: true }, '', location.href);
-    history.pushState({ wavelengthGuard: true, wavelengthApp: true }, '', location.href);
+    history.pushState({ wavelengthGuard: true, wavelengthApp: true, wavelengthScreen: 'landing' }, '', location.href);
   }
 
   window.addEventListener('popstate', () => {
@@ -825,10 +829,12 @@
 
     ws.addEventListener('open', () => {
       reconnectAttempts = 0;
-      ws.send(JSON.stringify({ type: 'identify', deviceId: myDeviceId }));
-      const name = nameInput.value.trim();
-      if (name) ws.send(JSON.stringify({ type: 'set_name', name }));
-      ws.send(JSON.stringify({ type: 'set_avatar', avatarId: getMyAvatarId() }));
+      ws.send(JSON.stringify({
+        type: 'identify',
+        deviceId: myDeviceId,
+        name: nameInput.value.trim(),
+        avatarId: getMyAvatarId()
+      }));
       ws.send(JSON.stringify({ type: 'whoami' }));
       refreshInboxBadge();
 
@@ -887,6 +893,27 @@
           refreshSettingsProfile();
         }
         break;
+
+      case 'profile_result':
+        if (msg.name && nameInput) nameInput.value = msg.name;
+        if (msg.avatarId && isValidAvatarId(msg.avatarId)) localStorage.setItem(AVATAR_ID_KEY, msg.avatarId);
+        refreshSettingsProfile();
+        renderAvatarPicker();
+        break;
+
+      case 'profile_updated': {
+        const c = latestContacts.find(x => x.contactId === msg.deviceId);
+        if (c) {
+          c.name = msg.name || c.name;
+          c.avatar = msg.avatarId || c.avatar;
+          renderInboxList();
+          if (currentThreadContactId === msg.deviceId) {
+            threadWithLabel.textContent = c.name;
+            renderAvatarInto(threadAvatar, c.avatar);
+          }
+        }
+        break;
+      }
 
       case 'auth_success':
         handleAuthSuccess(msg);
@@ -1808,6 +1835,8 @@
   }
 
   function hideCallUI() {
+    clearTimeout(callAnswerTimeout);
+    callAnswerTimeout = null;
     incomingCallModal.classList.add('hidden');
     activeCallBar.classList.add('hidden');
     activeCallBar.classList.remove('expanded');
@@ -1817,6 +1846,8 @@
   }
 
   function setCallConnected() {
+    clearTimeout(callAnswerTimeout);
+    callAnswerTimeout = null;
     activeCallStatus.textContent = 'Connected';
     startCallTimer();
     startCallQualityMonitor();
@@ -2033,6 +2064,13 @@
         fromName: activeCallContactName,
         fromAvatar: getMyAvatarId()
       });
+      clearTimeout(callAnswerTimeout);
+      callAnswerTimeout = setTimeout(() => {
+        if (activeCallContactId && !callStartedAt) {
+          activeCallStatus.textContent = 'No answer';
+          setTimeout(() => { if (activeCallContactId && !callStartedAt) endCall(true); }, 900);
+        }
+      }, 40000);
     } catch (err) {
       console.error('startCall failed:', err);
       endCall(false);
@@ -2068,6 +2106,8 @@
   }
 
   function endCall(notify = true) {
+    clearTimeout(callAnswerTimeout);
+    callAnswerTimeout = null;
     clearTimeout(callDisconnectTimer);
     callDisconnectTimer = null;
     callReconnectInProgress = false;
@@ -2265,6 +2305,7 @@
       const tab = item.dataset.tab;
       if (tab === 'landing') {
         showScreen('landing');
+        pushNavState('landing');
       } else if (tab === 'inbox') {
         showScreen('inbox');
         sendWs('get_contacts');

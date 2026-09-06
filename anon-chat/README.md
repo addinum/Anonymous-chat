@@ -104,3 +104,9 @@ The private VAPID key must stay in Render environment variables and must not be 
 - Home Back opens the close dialog.
 - Settings, Inbox, and Chat Back return to Home without the dialog.
 - Tab switching remains functional.
+
+## Final reliability notes
+- `public/avatars/` is included in this final deployment build.
+- WebRTC uses STUN plus a TURN fallback. For production, configure `TURN_URL`, `TURN_USERNAME`, and `TURN_CREDENTIAL` in Render with your preferred TURN provider to replace the public fallback.
+- Calls automatically end after about 40 seconds if the other person does not answer.
+- Profiles are persisted in MongoDB and synchronized to contacts.
