@@ -81,14 +81,14 @@ async function generateAiAvatar() {
     body: JSON.stringify({
       model: 'gemini-3.1-flash-image',
       input: aiAvatarPrompt(),
-      response_format: { type: 'image', mime_type: 'image/png', aspect_ratio: '1:1', image_size: '0.5K' }
+      response_format: { type: 'image', mime_type: 'image/jpeg', aspect_ratio: '1:1', image_size: '512' }
     })
   });
   const data = await response.json();
   if (!response.ok) throw new Error(data?.error?.message || `Gemini API error ${response.status}`);
   const image = data?.output_image;
   if (!image?.data) throw new Error('Gemini did not return an image');
-  return { data: image.data, mime: image.mime_type || 'image/png' };
+  return { data: image.data, mime: image.mime_type || 'image/jpeg' };
 }
 
 // ---- Simple static file server for the frontend ----

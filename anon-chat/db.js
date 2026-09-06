@@ -177,10 +177,10 @@ async function getProfile(deviceId) {
   catch (err) { console.error('getProfile failed:', err.message); return null; }
 }
 
-async function saveAiAvatar(deviceId, dataBase64, mimeType = 'image/png') {
+async function saveAiAvatar(deviceId, dataBase64, mimeType = 'image/jpeg') {
   if (!isReady() || !deviceId || !dataBase64) return null;
   try {
-    const cleanMime = /^image\/(png|jpeg|jpg|webp)$/.test(String(mimeType)) ? String(mimeType) : 'image/png';
+    const cleanMime = /^image\/(png|jpeg|jpg|webp)$/.test(String(mimeType)) ? String(mimeType) : 'image/jpeg';
     return await Profile.findOneAndUpdate(
       { deviceId },
       { $set: { avatarType: 'ai', avatarData: String(dataBase64), avatarMime: cleanMime, updatedAt: new Date() } },
