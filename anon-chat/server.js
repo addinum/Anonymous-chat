@@ -60,6 +60,37 @@ function notificationPreview(msgType, msg) {
   return 'Sent you a message';
 }
 
+const aiAvatarRequests = new Map();
+const AI_AVATAR_TRAITS = {
+  hair: ['short silver hair', 'long black hair', 'messy violet hair', 'soft brown hair', 'blue twin-tail hair', 'dark red hair'],
+  outfit: ['black hoodie', 'modern school jacket', 'minimal streetwear', 'blue casual jacket', 'white oversized sweater', 'dark techwear'],
+  mood: ['friendly smile', 'calm expression', 'confident expression', 'playful smile', 'gentle expression'],
+  accent: ['blue', 'purple', 'pink', 'cyan', 'red', 'gold']
+};
+function pick(list) { return list[Math.floor(Math.random() * list.length)]; }
+function aiAvatarPrompt() {
+  return `Create a single original anime-style profile avatar for a chat application. Head and shoulders portrait, centered face, square composition, clean polished 2D anime illustration, expressive eyes, simple soft background, no text, no logos, no watermark-like graphics, no recognizable existing character or celebrity. Character traits: ${pick(AI_AVATAR_TRAITS.hair)}, ${pick(AI_AVATAR_TRAITS.outfit)}, ${pick(AI_AVATAR_TRAITS.mood)}, ${pick(AI_AVATAR_TRAITS.accent)} accent color. Make it suitable as a small circular profile picture.`;
+}
+
+async function generateAiAvatar() {
+  const apiKey = process.env.GEMINI_API_KEY || '';
+  if (!apiKey) throw new Error('GEMINI_API_KEY is not configured');
+  const response = await fetch('https://generativelanguage.googleapis.com/v1beta/interactions', {
+    method: 'POST',
+    headers: { 'x-goog-api-key': apiKey, 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      model: 'gemini-3.1-flash-image',
+      input: aiAvatarPrompt(),
+      response_format: { type: 'image', mime_type: 'image/png', aspect_ratio: '1:1', image_size: '0.5K' }
+    })
+  });
+  const data = await response.json();
+  if (!response.ok) throw new Error(data?.error?.message || `Gemini API error ${response.status}`);
+  const image = data?.output_image;
+  if (!image?.data) throw new Error('Gemini did not return an image');
+  return { data: image.data, mime: image.mime_type || 'image/png' };
+}
+
 // ---- Simple static file server for the frontend ----
 const MIME = {
   '.html': 'text/html',
@@ -72,6 +103,43 @@ const MIME = {
 };
 
 const server = http.createServer((req, res) => {
+  const requestUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+  if (req.method === 'GET' && requestUrl.pathname.startsWith('/api/avatar/')) {
+    const deviceId = decodeURIComponent(requestUrl.pathname.slice('/api/avatar/'.length)).slice(0, 128);
+    db.getAvatarImage(deviceId).then(image => {
+      if (!image) { res.writeHead(404); return res.end('Avatar not found'); }
+      const buffer = Buffer.from(image.data, 'base64');
+      res.writeHead(200, { 'Content-Type': image.mime, 'Cache-Control': 'public, max-age=3600' });
+      res.end(buffer);
+    }).catch(() => { res.writeHead(500); res.end('Avatar error'); });
+    return;
+  }
+  if (req.method === 'POST' && requestUrl.pathname === '/api/ai-avatar') {
+    let body = '';
+    req.on('data', chunk => { body += chunk; if (body.length > 5000) req.destroy(); });
+    req.on('end', async () => {
+      try {
+        const data = JSON.parse(body || '{}');
+        const deviceId = String(data.deviceId || '').slice(0, 128);
+        if (!deviceId) throw new Error('Missing deviceId');
+        if (!process.env.GEMINI_API_KEY) throw new Error('AI avatar generation is not configured. Add GEMINI_API_KEY in Render.');
+        const now = Date.now();
+        const recent = aiAvatarRequests.get(deviceId) || 0;
+        if (now - recent < 20000) throw new Error('Please wait a few seconds before generating another avatar.');
+        aiAvatarRequests.set(deviceId, now);
+        const generated = await generateAiAvatar();
+        const saved = await db.saveAiAvatar(deviceId, generated.data, generated.mime);
+        if (!saved) throw new Error('Could not save the generated avatar. Check MongoDB connection.');
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+        res.end(JSON.stringify({ ok: true, avatarUrl: `/api/avatar/${encodeURIComponent(deviceId)}?v=${Date.now()}` }));
+      } catch (err) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ ok: false, error: err.message || 'AI avatar generation failed.' }));
+      }
+    });
+    return;
+  }
+
   if (req.method === 'GET' && new URL(req.url, `http://${req.headers.host || 'localhost'}`).pathname === '/api/rtc-config') {
     const turnUrl = process.env.TURN_URL || '';
     const turnUsername = process.env.TURN_USERNAME || '';
@@ -154,7 +222,8 @@ const wss = new WebSocket.Server({ server });
 let waitingQueue = [];       // sockets waiting for a random match
 const partners = new Map();  // ws -> partner ws
 const names = new Map();     // ws -> display name
-const avatars = new Map();   // ws -> chosen avatar id (e.g. 'a1'..'a10')
+const avatars = new Map();   // ws -> legacy avatar id
+const avatarUrls = new Map(); // ws -> rendered avatar URL
 const codeWaiting = new Map(); // friend code -> ws waiting to be joined
 const deviceOnline = new Map(); // deviceId -> ws (for inbox delivery)
 const wsDeviceId = new Map();   // ws -> deviceId (reverse lookup)
@@ -195,8 +264,8 @@ function breakPair(ws, notifyPartner = true) {
 function pairUp(a, b) {
   partners.set(a, b);
   partners.set(b, a);
-  send(a, 'matched', { strangerName: names.get(b) || 'Stranger', strangerAvatarId: avatars.get(b) || 'a1' });
-  send(b, 'matched', { strangerName: names.get(a) || 'Stranger', strangerAvatarId: avatars.get(a) || 'a1' });
+  send(a, 'matched', { strangerName: names.get(b) || 'Stranger', strangerAvatarId: avatars.get(b) || 'boy1', strangerAvatarUrl: avatarUrls.get(b) || null });
+  send(b, 'matched', { strangerName: names.get(a) || 'Stranger', strangerAvatarId: avatars.get(a) || 'boy1', strangerAvatarUrl: avatarUrls.get(a) || null });
 }
 
 function tryMatch(ws) {
@@ -272,12 +341,13 @@ wss.on('connection', (ws) => {
           if (profile) {
             names.set(ws, profile.name || 'Stranger');
             avatars.set(ws, profile.avatarId || 'boy1');
+            avatarUrls.set(ws, profile.avatarType === 'ai' ? `/api/avatar/${encodeURIComponent(deviceId)}` : null);
           } else {
             names.set(ws, String(msg.name || 'Stranger').slice(0, 24).trim() || 'Stranger');
             avatars.set(ws, ['boy1','boy2','boy3','boy4','boy5','girl1','girl2','girl3','girl4','girl5'].includes(msg.avatarId) ? msg.avatarId : 'boy1');
             await db.upsertProfile(deviceId, names.get(ws), avatars.get(ws));
           }
-          send(ws, 'profile_result', { name: names.get(ws) || 'Stranger', avatarId: avatars.get(ws) || 'boy1' });
+          send(ws, 'profile_result', { name: names.get(ws) || 'Stranger', avatarId: avatars.get(ws) || 'boy1', avatarUrl: avatarUrls.get(ws) || null });
           const contacts = await db.getContacts(deviceId);
           contacts.forEach(c => {
             const contactWs = deviceOnline.get(c.contactId);
@@ -345,9 +415,24 @@ wss.on('connection', (ws) => {
           db.refreshContactProfile(myId, names.get(ws), avatars.get(ws) || 'boy1');
           db.getContacts(myId).then(contacts => contacts.forEach(c => {
             const contactWs = deviceOnline.get(c.contactId);
-            if (contactWs) send(contactWs, 'profile_updated', { deviceId: myId, name: names.get(ws), avatarId: avatars.get(ws) || 'boy1' });
+            if (contactWs) send(contactWs, 'profile_updated', { deviceId: myId, name: names.get(ws), avatarId: avatars.get(ws) || 'boy1', avatarUrl: avatarUrls.get(ws) || null });
           })).catch(() => {});
         }
+        break;
+      }
+
+      case 'set_ai_avatar': {
+        const myId = wsDeviceId.get(ws);
+        if (!myId) break;
+        const profile = await db.getProfile(myId);
+        const aiUrl = `/api/avatar/${encodeURIComponent(myId)}`;
+        avatarUrls.set(ws, aiUrl);
+        send(ws, 'profile_result', { name: names.get(ws) || profile?.name || 'Stranger', avatarId: profile?.avatarId || 'boy1', avatarUrl: aiUrl });
+        db.refreshContactProfile(myId, names.get(ws) || 'Stranger', aiUrl);
+        db.getContacts(myId).then(contacts => contacts.forEach(c => {
+          const contactWs = deviceOnline.get(c.contactId);
+          if (contactWs) send(contactWs, 'profile_updated', { deviceId: myId, name: names.get(ws) || 'Stranger', avatarId: 'boy1', avatarUrl: aiUrl });
+        })).catch(() => {});
         break;
       }
 
@@ -355,13 +440,14 @@ wss.on('connection', (ws) => {
         const avatarId = String(msg.avatarId || '').slice(0, 8).trim();
         const VALID_AVATAR_IDS = new Set(['boy1', 'boy2', 'boy3', 'boy4', 'boy5', 'girl1', 'girl2', 'girl3', 'girl4', 'girl5']);
         avatars.set(ws, VALID_AVATAR_IDS.has(avatarId) ? avatarId : 'boy1');
+        avatarUrls.set(ws, null);
         const myId = wsDeviceId.get(ws);
         if (myId) {
-          db.upsertProfile(myId, names.get(ws) || 'Stranger', avatars.get(ws));
+          db.setLegacyAvatar(myId, names.get(ws) || 'Stranger', avatars.get(ws));
           db.refreshContactProfile(myId, names.get(ws) || 'Stranger', avatars.get(ws));
           db.getContacts(myId).then(contacts => contacts.forEach(c => {
             const contactWs = deviceOnline.get(c.contactId);
-            if (contactWs) send(contactWs, 'profile_updated', { deviceId: myId, name: names.get(ws) || 'Stranger', avatarId: avatars.get(ws) });
+            if (contactWs) send(contactWs, 'profile_updated', { deviceId: myId, name: names.get(ws) || 'Stranger', avatarId: avatars.get(ws), avatarUrl: null });
           })).catch(() => {});
         }
         break;
@@ -618,7 +704,8 @@ wss.on('connection', (ws) => {
           send(recipientWs, 'call_invite', {
             fromId: myId,
             fromName: String(msg.fromName || 'Contact').slice(0, 40),
-            fromAvatar: String(msg.fromAvatar || 'boy1').slice(0, 8)
+            fromAvatar: String(msg.fromAvatar || 'boy1').slice(0, 8),
+            fromAvatarUrl: avatarUrls.get(ws) || String(msg.fromAvatarUrl || '').slice(0, 180)
           });
         }
         break;
@@ -782,6 +869,7 @@ wss.on('connection', (ws) => {
     removeFromCodeWaiting(ws);
     names.delete(ws);
     avatars.delete(ws);
+    avatarUrls.delete(ws);
     const deviceId = wsDeviceId.get(ws);
     if (deviceId) activeThreads.delete(deviceId);
     if (deviceId && deviceOnline.get(deviceId) === ws) {

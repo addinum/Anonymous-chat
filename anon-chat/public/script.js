@@ -38,6 +38,8 @@
   const settingsProfileAccount = document.getElementById('settingsProfileAccount');
   const settingsAvatarPreview = document.getElementById('settingsAvatarPreview');
   const saveProfileBtn = document.getElementById('saveProfileBtn');
+  const generateAiAvatarBtn = document.getElementById('generateAiAvatarBtn');
+  const aiAvatarStatus = document.getElementById('aiAvatarStatus');
   const profileSaveStatus = document.getElementById('profileSaveStatus');
   const settingsDarkModeToggle = document.getElementById('settingsDarkModeToggle');
   const bottomNav = document.getElementById('bottomNav');
@@ -317,7 +319,8 @@
   if (saveProfileBtn) saveProfileBtn.addEventListener('click', () => {
     const name = nameInput.value.trim();
     if (name) sendWs('set_name', { name });
-    sendWs('set_avatar', { avatarId: getMyAvatarId() });
+    const avatarRef = getMyAvatarRef();
+    if (isLegacyAvatarRef(avatarRef)) sendWs('set_avatar', { avatarId: avatarRef });
     profileSaveStatus.textContent = '✓ Profile saved';
     refreshSettingsProfile();
     setTimeout(() => { if (profileSaveStatus) profileSaveStatus.textContent = ''; }, 2200);
@@ -410,33 +413,43 @@
 
   // ---------- Timestamp helpers (for the WhatsApp-style Inbox) ----------
 
-  // ---------- Chosen-avatar system (10 real image avatars) ----------
+  // ---------- Avatar system: classic avatars + AI-generated Nano Banana avatars ----------
   const AVATAR_IDS = ['boy1', 'boy2', 'boy3', 'boy4', 'boy5', 'girl1', 'girl2', 'girl3', 'girl4', 'girl5'];
-
-  function isValidAvatarId(id) {
-    return AVATAR_IDS.includes(id);
-  }
-
-  function avatarSrc(id) {
-    return `avatars/${isValidAvatarId(id) ? id : 'boy1'}.jpg`;
-  }
-
   const AVATAR_ID_KEY = 'wavelength_avatar_id';
+  const AVATAR_REF_KEY = 'wavelength_avatar_ref';
 
-  function getMyAvatarId() {
-    const stored = localStorage.getItem(AVATAR_ID_KEY);
-    return isValidAvatarId(stored) ? stored : 'boy1';
+  function isValidAvatarId(id) { return AVATAR_IDS.includes(id); }
+  function isLegacyAvatarRef(ref) { return isValidAvatarId(ref); }
+  function getMyAvatarRef() {
+    const ref = localStorage.getItem(AVATAR_REF_KEY);
+    if (ref && (isValidAvatarId(ref) || ref.startsWith('/api/avatar/'))) return ref;
+    const legacy = localStorage.getItem(AVATAR_ID_KEY);
+    return isValidAvatarId(legacy) ? legacy : 'boy1';
   }
-
+  function getMyAvatarId() {
+    const ref = getMyAvatarRef();
+    return isValidAvatarId(ref) ? ref : 'boy1';
+  }
+  function avatarSrc(ref) {
+    if (typeof ref === 'string' && (ref.startsWith('/api/avatar/') || ref.startsWith('data:image/'))) return ref;
+    return `avatars/${isValidAvatarId(ref) ? ref : 'boy1'}.jpg`;
+  }
   function setMyAvatarId(id) {
+    if (!isValidAvatarId(id)) return;
     localStorage.setItem(AVATAR_ID_KEY, id);
+    localStorage.setItem(AVATAR_REF_KEY, id);
     sendWs('set_avatar', { avatarId: id });
     renderAvatarPicker();
     refreshSettingsProfile();
   }
-
+  function setMyAiAvatar(url) {
+    localStorage.setItem(AVATAR_REF_KEY, url);
+    renderAvatarPicker();
+    refreshSettingsProfile();
+  }
   function renderAvatarPicker() {
-    const selected = getMyAvatarId();
+    if (!avatarGrid) return;
+    const selected = getMyAvatarRef();
     avatarGrid.innerHTML = '';
     AVATAR_IDS.forEach((id) => {
       const btn = document.createElement('button');
@@ -446,13 +459,44 @@
       btn.addEventListener('click', () => setMyAvatarId(id));
       avatarGrid.appendChild(btn);
     });
+    if (!isLegacyAvatarRef(selected)) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'avatar-option avatar-option--selected avatar-option--ai';
+      btn.innerHTML = `<img src="${avatarSrc(selected)}" alt="Your AI avatar">`;
+      btn.title = 'Your generated AI avatar';
+      avatarGrid.prepend(btn);
+    }
+  }
+  function renderAvatarInto(el, avatarRef) {
+    if (!el) return;
+    const src = avatarSrc(avatarRef);
+    el.innerHTML = `<img src="${src}" alt="Avatar" loading="lazy">`;
   }
 
-  // Renders the chosen avatar image into any small circular avatar slot
-  // (inbox rows, thread header, live chat header) given an avatar id.
-  function renderAvatarInto(el, avatarId) {
-    el.innerHTML = `<img src="${avatarSrc(avatarId)}" alt="Avatar">`;
+  async function generateAiAvatar() {
+    if (!generateAiAvatarBtn) return;
+    generateAiAvatarBtn.disabled = true;
+    if (aiAvatarStatus) aiAvatarStatus.textContent = 'Generating your avatar…';
+    try {
+      const response = await fetch('/api/ai-avatar', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ deviceId: myDeviceId })
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || !result.ok) throw new Error(result.error || 'Could not generate avatar.');
+      const url = result.avatarUrl;
+      setMyAiAvatar(url);
+      sendWs('set_ai_avatar');
+      if (aiAvatarStatus) aiAvatarStatus.textContent = '✓ New AI avatar generated';
+    } catch (err) {
+      if (aiAvatarStatus) aiAvatarStatus.textContent = `⚠ ${err.message}`;
+    } finally {
+      generateAiAvatarBtn.disabled = false;
+    }
   }
+  if (generateAiAvatarBtn) generateAiAvatarBtn.addEventListener('click', generateAiAvatar);
 
   function formatInboxTime(dateInput) {
     const date = new Date(dateInput);
@@ -896,7 +940,12 @@
 
       case 'profile_result':
         if (msg.name && nameInput) nameInput.value = msg.name;
-        if (msg.avatarId && isValidAvatarId(msg.avatarId)) localStorage.setItem(AVATAR_ID_KEY, msg.avatarId);
+        if (msg.avatarUrl) {
+          localStorage.setItem(AVATAR_REF_KEY, msg.avatarUrl);
+        } else if (msg.avatarId && isValidAvatarId(msg.avatarId)) {
+          localStorage.setItem(AVATAR_ID_KEY, msg.avatarId);
+          localStorage.setItem(AVATAR_REF_KEY, msg.avatarId);
+        }
         refreshSettingsProfile();
         renderAvatarPicker();
         break;
@@ -905,7 +954,7 @@
         const c = latestContacts.find(x => x.contactId === msg.deviceId);
         if (c) {
           c.name = msg.name || c.name;
-          c.avatar = msg.avatarId || c.avatar;
+          c.avatar = msg.avatarUrl || msg.avatarId || c.avatar;
           renderInboxList();
           if (currentThreadContactId === msg.deviceId) {
             threadWithLabel.textContent = c.name;
@@ -958,7 +1007,7 @@
         currentStrangerName = msg.strangerName || 'Stranger';
         chatLog.innerHTML = '';
         chatWithLabel.textContent = `Connected to ${currentStrangerName}`;
-        renderAvatarInto(chatAvatar, msg.strangerAvatarId);
+        renderAvatarInto(chatAvatar, msg.strangerAvatarUrl || msg.strangerAvatarId);
         showScreen('chat');
         pushChatHistoryState();
         addSystemBubble("You're connected. Say hi 👋");
@@ -1122,7 +1171,7 @@
         if (activeCallContactId || pendingIncomingCall) break;
         pendingIncomingCall = msg;
         incomingCallName.textContent = msg.fromName || 'Contact';
-        setCallAvatar(incomingCallAvatar, msg.fromAvatar || 'boy1');
+        setCallAvatar(incomingCallAvatar, msg.fromAvatarUrl || msg.fromAvatar || 'boy1');
         incomingCallModal.classList.remove('hidden');
         break;
 
@@ -2062,7 +2111,8 @@
       sendWs('call_invite', {
         toDeviceId: activeCallContactId,
         fromName: activeCallContactName,
-        fromAvatar: getMyAvatarId()
+        fromAvatar: getMyAvatarId(),
+        fromAvatarUrl: getMyAvatarRef().startsWith('/api/avatar/') ? getMyAvatarRef() : null
       });
       clearTimeout(callAnswerTimeout);
       callAnswerTimeout = setTimeout(() => {

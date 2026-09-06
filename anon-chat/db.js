@@ -11,6 +11,9 @@ const profileSchema = new mongoose.Schema({
   deviceId: { type: String, required: true, unique: true, index: true },
   name: { type: String, default: 'Stranger' },
   avatarId: { type: String, default: 'boy1' },
+  avatarType: { type: String, enum: ['legacy', 'ai'], default: 'legacy' },
+  avatarData: { type: String, default: null },
+  avatarMime: { type: String, default: 'image/png' },
   updatedAt: { type: Date, default: Date.now },
 });
 
@@ -154,10 +157,45 @@ async function upsertProfile(deviceId, name, avatarId) {
   } catch (err) { console.error('upsertProfile failed:', err.message); return null; }
 }
 
+async function setLegacyAvatar(deviceId, name, avatarId) {
+  if (!isReady() || !deviceId) return null;
+  try {
+    const valid = new Set(['boy1','boy2','boy3','boy4','boy5','girl1','girl2','girl3','girl4','girl5']);
+    const cleanAvatar = valid.has(String(avatarId)) ? String(avatarId) : 'boy1';
+    const cleanName = String(name || 'Stranger').slice(0, 24).trim() || 'Stranger';
+    return await Profile.findOneAndUpdate(
+      { deviceId },
+      { $set: { name: cleanName, avatarId: cleanAvatar, avatarType: 'legacy', avatarData: null, avatarMime: 'image/jpeg', updatedAt: new Date() } },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    ).lean();
+  } catch (err) { console.error('setLegacyAvatar failed:', err.message); return null; }
+}
+
 async function getProfile(deviceId) {
   if (!isReady() || !deviceId) return null;
   try { return await Profile.findOne({ deviceId }).lean(); }
   catch (err) { console.error('getProfile failed:', err.message); return null; }
+}
+
+async function saveAiAvatar(deviceId, dataBase64, mimeType = 'image/png') {
+  if (!isReady() || !deviceId || !dataBase64) return null;
+  try {
+    const cleanMime = /^image\/(png|jpeg|jpg|webp)$/.test(String(mimeType)) ? String(mimeType) : 'image/png';
+    return await Profile.findOneAndUpdate(
+      { deviceId },
+      { $set: { avatarType: 'ai', avatarData: String(dataBase64), avatarMime: cleanMime, updatedAt: new Date() } },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    ).lean();
+  } catch (err) { console.error('saveAiAvatar failed:', err.message); return null; }
+}
+
+async function getAvatarImage(deviceId) {
+  if (!isReady() || !deviceId) return null;
+  try {
+    const profile = await Profile.findOne({ deviceId }).select('avatarType avatarData avatarMime').lean();
+    if (!profile || profile.avatarType !== 'ai' || !profile.avatarData) return null;
+    return { data: profile.avatarData, mime: profile.avatarMime || 'image/png' };
+  } catch (err) { console.error('getAvatarImage failed:', err.message); return null; }
 }
 
 async function refreshContactProfile(deviceId, name, avatarId) {
@@ -297,7 +335,7 @@ async function getContacts(ownerId) {
     for (const c of contacts) {
       const profile = await Profile.findOne({ deviceId: c.contactId }).lean();
       const contactName = profile?.name || c.contactName || 'Stranger';
-      const contactAvatar = profile?.avatarId || c.contactAvatar || 'boy1';
+      const contactAvatar = profile?.avatarType === 'ai' ? `/api/avatar/${encodeURIComponent(c.contactId)}` : (profile?.avatarId || c.contactAvatar || 'boy1');
       const unreadCount = await Message.countDocuments({
         fromId: c.contactId,
         toId: ownerId,
@@ -446,7 +484,7 @@ async function toggleReaction(messageId, userId, emoji) {
   if (!isReady()) return null;
   try {
     const msg = await Message.findById(messageId);
-    if (!msg) return null;
+    if (!msg || (msg.fromId !== userId && msg.toId !== userId)) return null;
     const idx = (msg.reactions || []).findIndex(r => r.userId === userId);
     if (idx >= 0 && msg.reactions[idx].emoji === emoji) msg.reactions.splice(idx, 1);
     else if (idx >= 0) msg.reactions[idx].emoji = emoji;
@@ -471,6 +509,9 @@ module.exports = {
   getAccountByDeviceId,
   upsertProfile,
   getProfile,
+  saveAiAvatar,
+  getAvatarImage,
+  setLegacyAvatar,
   refreshContactProfile,
   updateAccount,
   saveContactPair,
