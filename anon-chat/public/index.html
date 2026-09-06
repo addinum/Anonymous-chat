@@ -135,15 +135,7 @@
       </div>
       <label class="settings-label">Display name</label>
       <input class="settings-input" type="search" id="wlHandleInput" name="wl-handle-x7" placeholder="Leave blank to stay Stranger" maxlength="24" autocomplete="off" autocorrect="off" spellcheck="false" data-lpignore="true" data-form-type="other" enterkeyhint="done">
-      <div class="settings-label-row"><span class="settings-label">Avatar</span><span class="settings-mini">AI or classic</span></div>
-      <div class="ai-avatar-box">
-        <div class="ai-avatar-copy">
-          <strong>✨ AI Anime Avatar</strong>
-          <span>Generate an original anime-style profile picture with Nano Banana.</span>
-        </div>
-        <button type="button" id="generateAiAvatarBtn" class="btn-secondary">✨ Generate AI Avatar</button>
-        <p id="aiAvatarStatus" class="settings-status"></p>
-      </div>
+      <div class="settings-label-row"><span class="settings-label">Avatar</span><span class="settings-mini">Choose one</span></div>
       <div class="avatar-picker settings-avatar-picker">
         <div class="avatar-picker__grid" id="avatarGrid"></div>
       </div>
@@ -339,7 +331,7 @@
 </div>
 
 <div id="activeCallBar" class="call-bar hidden" aria-label="Active call">
-  <button type="button" id="callBarMain" class="call-bar__main" aria-expanded="false">
+  <div id="callBarMain" class="call-bar__main" role="button" tabindex="0" aria-expanded="false" aria-label="Expand active call">
     <div class="call-bar__info">
       <div class="call-bar__avatar" id="activeCallAvatar">?</div>
       <div class="call-bar__details">
@@ -347,8 +339,11 @@
         <span id="activeCallStatus">Calling…</span>
       </div>
     </div>
-    <span class="call-bar__chevron" aria-hidden="true">⌃</span>
-  </button>
+    <div class="call-bar__main-actions">
+      <button type="button" id="callBarHangupBtn" class="call-bar__hangup" aria-label="End call" title="End call">☎</button>
+      <span class="call-bar__chevron" aria-hidden="true">⌃</span>
+    </div>
+  </div>
   <div class="call-bar__controls" id="callBarControls">
     <div class="call-stat">
       <span class="call-stat__label">Duration</span>

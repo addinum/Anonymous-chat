@@ -112,20 +112,5 @@ The private VAPID key must stay in Render environment variables and must not be 
 - Profiles are persisted in MongoDB and synchronized to contacts.
 
 
-## ✨ AI Anime Avatars (Nano Banana 2)
-
-Wavelength can generate original anime-style profile avatars with Google's Gemini image generation API. The server uses **Nano Banana 2 (`gemini-3.1-flash-image`)** and stores the generated image in MongoDB so it survives Render restarts.
-
-### Render environment variable
-
-Add:
-
-```text
-GEMINI_API_KEY=your_google_ai_studio_api_key
-```
-
-Do **not** put the Gemini API key in `public/script.js` or any browser code.
-
-In **Settings → Your profile → AI Anime Avatar**, press **Generate AI Avatar**. The server generates a new original square avatar, saves it, and synchronizes it to contacts.
-
-AI avatar generation is rate-limited to one generation per 20 seconds per device to avoid accidental repeated API calls.
+## Avatar generation
+This build intentionally uses the existing built-in avatar set. AI avatar generation (Gemini/Nano Banana) is not included.

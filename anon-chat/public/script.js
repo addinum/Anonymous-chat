@@ -38,8 +38,6 @@
   const settingsProfileAccount = document.getElementById('settingsProfileAccount');
   const settingsAvatarPreview = document.getElementById('settingsAvatarPreview');
   const saveProfileBtn = document.getElementById('saveProfileBtn');
-  const generateAiAvatarBtn = document.getElementById('generateAiAvatarBtn');
-  const aiAvatarStatus = document.getElementById('aiAvatarStatus');
   const profileSaveStatus = document.getElementById('profileSaveStatus');
   const settingsDarkModeToggle = document.getElementById('settingsDarkModeToggle');
   const bottomNav = document.getElementById('bottomNav');
@@ -319,8 +317,7 @@
   if (saveProfileBtn) saveProfileBtn.addEventListener('click', () => {
     const name = nameInput.value.trim();
     if (name) sendWs('set_name', { name });
-    const avatarRef = getMyAvatarRef();
-    if (isLegacyAvatarRef(avatarRef)) sendWs('set_avatar', { avatarId: avatarRef });
+    sendWs('set_avatar', { avatarId: getMyAvatarId() });
     profileSaveStatus.textContent = '✓ Profile saved';
     refreshSettingsProfile();
     setTimeout(() => { if (profileSaveStatus) profileSaveStatus.textContent = ''; }, 2200);
@@ -413,43 +410,33 @@
 
   // ---------- Timestamp helpers (for the WhatsApp-style Inbox) ----------
 
-  // ---------- Avatar system: classic avatars + AI-generated Nano Banana avatars ----------
+  // ---------- Chosen-avatar system (10 real image avatars) ----------
   const AVATAR_IDS = ['boy1', 'boy2', 'boy3', 'boy4', 'boy5', 'girl1', 'girl2', 'girl3', 'girl4', 'girl5'];
-  const AVATAR_ID_KEY = 'wavelength_avatar_id';
-  const AVATAR_REF_KEY = 'wavelength_avatar_ref';
 
-  function isValidAvatarId(id) { return AVATAR_IDS.includes(id); }
-  function isLegacyAvatarRef(ref) { return isValidAvatarId(ref); }
-  function getMyAvatarRef() {
-    const ref = localStorage.getItem(AVATAR_REF_KEY);
-    if (ref && (isValidAvatarId(ref) || ref.startsWith('/api/avatar/'))) return ref;
-    const legacy = localStorage.getItem(AVATAR_ID_KEY);
-    return isValidAvatarId(legacy) ? legacy : 'boy1';
+  function isValidAvatarId(id) {
+    return AVATAR_IDS.includes(id);
   }
+
+  function avatarSrc(id) {
+    return `avatars/${isValidAvatarId(id) ? id : 'boy1'}.jpg`;
+  }
+
+  const AVATAR_ID_KEY = 'wavelength_avatar_id';
+
   function getMyAvatarId() {
-    const ref = getMyAvatarRef();
-    return isValidAvatarId(ref) ? ref : 'boy1';
+    const stored = localStorage.getItem(AVATAR_ID_KEY);
+    return isValidAvatarId(stored) ? stored : 'boy1';
   }
-  function avatarSrc(ref) {
-    if (typeof ref === 'string' && (ref.startsWith('/api/avatar/') || ref.startsWith('data:image/'))) return ref;
-    return `avatars/${isValidAvatarId(ref) ? ref : 'boy1'}.jpg`;
-  }
+
   function setMyAvatarId(id) {
-    if (!isValidAvatarId(id)) return;
     localStorage.setItem(AVATAR_ID_KEY, id);
-    localStorage.setItem(AVATAR_REF_KEY, id);
     sendWs('set_avatar', { avatarId: id });
     renderAvatarPicker();
     refreshSettingsProfile();
   }
-  function setMyAiAvatar(url) {
-    localStorage.setItem(AVATAR_REF_KEY, url);
-    renderAvatarPicker();
-    refreshSettingsProfile();
-  }
+
   function renderAvatarPicker() {
-    if (!avatarGrid) return;
-    const selected = getMyAvatarRef();
+    const selected = getMyAvatarId();
     avatarGrid.innerHTML = '';
     AVATAR_IDS.forEach((id) => {
       const btn = document.createElement('button');
@@ -459,44 +446,13 @@
       btn.addEventListener('click', () => setMyAvatarId(id));
       avatarGrid.appendChild(btn);
     });
-    if (!isLegacyAvatarRef(selected)) {
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'avatar-option avatar-option--selected avatar-option--ai';
-      btn.innerHTML = `<img src="${avatarSrc(selected)}" alt="Your AI avatar">`;
-      btn.title = 'Your generated AI avatar';
-      avatarGrid.prepend(btn);
-    }
-  }
-  function renderAvatarInto(el, avatarRef) {
-    if (!el) return;
-    const src = avatarSrc(avatarRef);
-    el.innerHTML = `<img src="${src}" alt="Avatar" loading="lazy">`;
   }
 
-  async function generateAiAvatar() {
-    if (!generateAiAvatarBtn) return;
-    generateAiAvatarBtn.disabled = true;
-    if (aiAvatarStatus) aiAvatarStatus.textContent = 'Generating your avatar…';
-    try {
-      const response = await fetch('/api/ai-avatar', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ deviceId: myDeviceId })
-      });
-      const result = await response.json().catch(() => ({}));
-      if (!response.ok || !result.ok) throw new Error(result.error || 'Could not generate avatar.');
-      const url = result.avatarUrl;
-      setMyAiAvatar(url);
-      sendWs('set_ai_avatar');
-      if (aiAvatarStatus) aiAvatarStatus.textContent = '✓ New AI avatar generated';
-    } catch (err) {
-      if (aiAvatarStatus) aiAvatarStatus.textContent = `⚠ ${err.message}`;
-    } finally {
-      generateAiAvatarBtn.disabled = false;
-    }
+  // Renders the chosen avatar image into any small circular avatar slot
+  // (inbox rows, thread header, live chat header) given an avatar id.
+  function renderAvatarInto(el, avatarId) {
+    el.innerHTML = `<img src="${avatarSrc(avatarId)}" alt="Avatar">`;
   }
-  if (generateAiAvatarBtn) generateAiAvatarBtn.addEventListener('click', generateAiAvatar);
 
   function formatInboxTime(dateInput) {
     const date = new Date(dateInput);
@@ -540,11 +496,9 @@
   setInterval(() => { dialFreq.textContent = randomFreq(); }, 900);
 
   // ---------- Android / browser Back button ----------
-  // App navigation uses one persistent browser-history guard:
-  //   Inner screen + Back -> Home
-  //   Home + Back -> Wavelength exit dialog
-  // The dialog's Yes button navigates to Google's homepage. It never
-  // attempts to force-close a normal Chrome tab.
+  // Keep a same-document history sentinel on Home. Android Chrome's Back
+  // button therefore fires popstate instead of immediately leaving Wavelength.
+  // Inner screens consume Back and return to Home; Home shows our own dialog.
   let wavelengthBackReady = false;
   let wavelengthCloseDialog = null;
   let wavelengthBackBusy = false;
@@ -602,6 +556,9 @@
     const hide = () => {
       overlay.classList.remove('show');
       document.body.classList.remove('wavelength-dialog-open');
+      // Re-arm the sentinel after No so the next Android Back still opens
+      // the Wavelength dialog rather than leaving the page.
+      armHomeBackGuard();
     };
 
     overlay.querySelector('.wavelength-close-no').addEventListener('click', hide);
@@ -609,8 +566,6 @@
       if (event.target === overlay) hide();
     });
     overlay.querySelector('.wavelength-close-yes').addEventListener('click', () => {
-      // A normal user-opened Chrome tab cannot be force-closed by a website.
-      // Navigate to Chrome's Google homepage instead, as requested.
       window.location.assign('https://www.google.com/');
     });
 
@@ -627,17 +582,16 @@
   function ensureWavelengthBackGuard() {
     if (!wavelengthBackReady) return;
     if (!history.state || !history.state.wavelengthGuard) {
-      history.pushState({ wavelengthGuard: true, wavelengthApp: true }, '', location.href);
+      history.pushState({ wavelengthGuard: true, wavelengthApp: true, wavelengthScreen: 'landing' }, '', location.href);
     }
   }
 
-  function prepareWavelengthBackGuard() {
-    if (wavelengthBackReady) return;
+  function armHomeBackGuard() {
     wavelengthBackReady = true;
-    // Create a dedicated Home entry plus a guard entry immediately. The
-    // guard is recreated after every Back event so Android Chrome remains
-    // inside Wavelength instead of leaving the page.
     history.replaceState({ wavelengthScreen: 'landing', wavelengthApp: true }, '', location.href);
+    // Two sentinel entries make the Home trap resilient to Android Chrome's
+    // gesture/system Back navigation while keeping the URL unchanged.
+    history.pushState({ wavelengthGuard: true, wavelengthApp: true, wavelengthScreen: 'landing' }, '', location.href);
     history.pushState({ wavelengthGuard: true, wavelengthApp: true, wavelengthScreen: 'landing' }, '', location.href);
   }
 
@@ -645,8 +599,6 @@
     if (!wavelengthBackReady || wavelengthBackBusy) return;
     wavelengthBackBusy = true;
 
-    // Decide from the actual visible screen, not from history.state. This
-    // makes the behavior reliable even when chat/thread entries exist.
     const wasHome = isHomeScreen();
 
     if (!wasHome) {
@@ -672,22 +624,23 @@
       showScreen('landing');
       refreshInboxBadge();
       history.replaceState({ wavelengthScreen: 'landing', wavelengthApp: true }, '', location.href);
-      ensureWavelengthBackGuard();
+      // Rebuild the Home sentinel immediately after consuming Back.
+      history.pushState({ wavelengthGuard: true, wavelengthApp: true, wavelengthScreen: 'landing' }, '', location.href);
+      history.pushState({ wavelengthGuard: true, wavelengthApp: true, wavelengthScreen: 'landing' }, '', location.href);
     } else {
-      // Home is the only place where Android Back opens the Wavelength dialog.
-      ensureWavelengthBackGuard();
+      // Re-arm first, then show the custom dialog. The page never attempts to
+      // call window.close(), because Chrome blocks closing ordinary tabs.
+      history.pushState({ wavelengthGuard: true, wavelengthApp: true, wavelengthScreen: 'landing' }, '', location.href);
       showCloseDialog();
     }
 
-    setTimeout(() => { wavelengthBackBusy = false; }, 120);
+    setTimeout(() => { wavelengthBackBusy = false; }, 80);
   });
 
-  document.addEventListener('DOMContentLoaded', () => {
-    setTimeout(prepareWavelengthBackGuard, 150);
-  });
-  if (document.readyState !== 'loading') {
-    setTimeout(prepareWavelengthBackGuard, 150);
-  }
+  // script.js is loaded at the end of <body>, so arm the Home trap
+  // immediately. This removes the old 150ms window in which Android Back
+  // could escape before the guard existed.
+  armHomeBackGuard();
 
   // ---------- Sound + browser notification ----------
   // ---------- Sound + browser notification ----------
@@ -940,12 +893,7 @@
 
       case 'profile_result':
         if (msg.name && nameInput) nameInput.value = msg.name;
-        if (msg.avatarUrl) {
-          localStorage.setItem(AVATAR_REF_KEY, msg.avatarUrl);
-        } else if (msg.avatarId && isValidAvatarId(msg.avatarId)) {
-          localStorage.setItem(AVATAR_ID_KEY, msg.avatarId);
-          localStorage.setItem(AVATAR_REF_KEY, msg.avatarId);
-        }
+        if (msg.avatarId && isValidAvatarId(msg.avatarId)) localStorage.setItem(AVATAR_ID_KEY, msg.avatarId);
         refreshSettingsProfile();
         renderAvatarPicker();
         break;
@@ -954,7 +902,7 @@
         const c = latestContacts.find(x => x.contactId === msg.deviceId);
         if (c) {
           c.name = msg.name || c.name;
-          c.avatar = msg.avatarUrl || msg.avatarId || c.avatar;
+          c.avatar = msg.avatarId || c.avatar;
           renderInboxList();
           if (currentThreadContactId === msg.deviceId) {
             threadWithLabel.textContent = c.name;
@@ -1007,7 +955,7 @@
         currentStrangerName = msg.strangerName || 'Stranger';
         chatLog.innerHTML = '';
         chatWithLabel.textContent = `Connected to ${currentStrangerName}`;
-        renderAvatarInto(chatAvatar, msg.strangerAvatarUrl || msg.strangerAvatarId);
+        renderAvatarInto(chatAvatar, msg.strangerAvatarId);
         showScreen('chat');
         pushChatHistoryState();
         addSystemBubble("You're connected. Say hi 👋");
@@ -1171,7 +1119,7 @@
         if (activeCallContactId || pendingIncomingCall) break;
         pendingIncomingCall = msg;
         incomingCallName.textContent = msg.fromName || 'Contact';
-        setCallAvatar(incomingCallAvatar, msg.fromAvatarUrl || msg.fromAvatar || 'boy1');
+        setCallAvatar(incomingCallAvatar, msg.fromAvatar || 'boy1');
         incomingCallModal.classList.remove('hidden');
         break;
 
@@ -1631,9 +1579,22 @@
     let bar = bubble.querySelector('.wa-reactions');
     if (!reactions || !reactions.length) { if (bar) bar.remove(); return; }
     const counts = {};
-    reactions.forEach(r => counts[r.emoji] = (counts[r.emoji] || 0) + 1);
+    const mine = new Set();
+    reactions.forEach(r => {
+      counts[r.emoji] = (counts[r.emoji] || 0) + 1;
+      if (r.userId === myDeviceId) mine.add(r.emoji);
+    });
     if (!bar) { bar = document.createElement('div'); bar.className = 'wa-reactions'; bubble.appendChild(bar); }
-    bar.innerHTML = Object.entries(counts).map(([e,c]) => `<span>${e}${c > 1 ? `<b>${c}</b>` : ''}</span>`).join('');
+    bar.innerHTML = Object.entries(counts).map(([e,c]) => {
+      const active = mine.has(e) ? ' wa-reactions__item--mine' : '';
+      return `<button type="button" class="wa-reactions__item${active}" data-reaction="${escapeHtml(e)}" aria-label="${mine.has(e) ? 'Remove' : 'React with'} ${escapeHtml(e)}">${e}${c > 1 ? `<b>${c}</b>` : ''}</button>`;
+    }).join('');
+    bar.querySelectorAll('[data-reaction]').forEach(btn => {
+      btn.addEventListener('click', (event) => {
+        event.stopPropagation();
+        sendWs('message_reaction', { id: bubble.dataset.msgId, emoji: btn.dataset.reaction });
+      });
+    });
   }
 
   function updateMessageStatus(id, status) {
@@ -2111,8 +2072,7 @@
       sendWs('call_invite', {
         toDeviceId: activeCallContactId,
         fromName: activeCallContactName,
-        fromAvatar: getMyAvatarId(),
-        fromAvatarUrl: getMyAvatarRef().startsWith('/api/avatar/') ? getMyAvatarRef() : null
+        fromAvatar: getMyAvatarId()
       });
       clearTimeout(callAnswerTimeout);
       callAnswerTimeout = setTimeout(() => {
@@ -2600,9 +2560,21 @@
   callAcceptBtn.addEventListener('click', acceptIncomingCall);
   callDeclineBtn.addEventListener('click', declineIncomingCall);
   callHangupBtn.addEventListener('click', (event) => { event.stopPropagation(); endCall(true); });
-  callBarMain.addEventListener('click', () => {
+  const callBarHangupBtn = document.getElementById('callBarHangupBtn');
+  if (callBarHangupBtn) callBarHangupBtn.addEventListener('click', (event) => { event.stopPropagation(); endCall(true); });
+  function toggleActiveCallBar() {
     const expanded = activeCallBar.classList.toggle('expanded');
     callBarMain.setAttribute('aria-expanded', String(expanded));
+  }
+  callBarMain.addEventListener('click', (event) => {
+    if (event.target.closest('#callBarHangupBtn')) return;
+    toggleActiveCallBar();
+  });
+  callBarMain.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      toggleActiveCallBar();
+    }
   });
   callBarControls.addEventListener('click', (event) => event.stopPropagation());
   callMuteBtn.addEventListener('click', toggleCallMute);
