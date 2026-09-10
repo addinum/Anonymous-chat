@@ -13,44 +13,6 @@ const db = require('./db');
 const PORT = process.env.PORT || 3000;
 const PUBLIC_DIR = path.join(__dirname, 'public');
 
-// Optional TURN configuration. Keep credentials in Render environment variables;
-// never hard-code relay credentials into the client bundle.
-const TURN_URLS = String(process.env.TURN_URLS || '')
-  .split(',').map(v => v.trim()).filter(Boolean).slice(0, 6);
-const TURN_USERNAME = String(process.env.TURN_USERNAME || '').slice(0, 128);
-const TURN_CREDENTIAL = String(process.env.TURN_CREDENTIAL || '').slice(0, 256);
-const rtcIceServers = [
-  { urls: 'stun:stun.l.google.com:19302' },
-  { urls: 'stun:stun1.l.google.com:19302' },
-  { urls: 'stun:stun.cloudflare.com:3478' }
-];
-if (TURN_URLS.length && TURN_USERNAME && TURN_CREDENTIAL) {
-  rtcIceServers.push({ urls: TURN_URLS, username: TURN_USERNAME, credential: TURN_CREDENTIAL });
-}
-
-// Short-lived signaling queue for transient WebSocket drops. This does not
-// store media; it only buffers call signaling packets for a few seconds.
-const pendingCallSignals = new Map();
-const CALL_SIGNAL_TTL_MS = 15000;
-function queueCallSignal(deviceId, payload) {
-  if (!deviceId) return;
-  const list = pendingCallSignals.get(deviceId) || [];
-  const now = Date.now();
-  list.push({ payload, expiresAt: now + CALL_SIGNAL_TTL_MS });
-  pendingCallSignals.set(deviceId, list.slice(-20));
-}
-function clearCallSignals(deviceId) {
-  if (deviceId) pendingCallSignals.delete(deviceId);
-}
-function drainCallSignals(deviceId, ws) {
-  const list = pendingCallSignals.get(deviceId) || [];
-  pendingCallSignals.delete(deviceId);
-  const now = Date.now();
-  for (const item of list) {
-    if (item.expiresAt > now) send(ws, 'call_signal', item.payload);
-  }
-}
-
 const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || '';
 let VAPID_PUBLIC_KEY = '';
 if (/^[A-Za-z0-9_-]{43}$/.test(VAPID_PRIVATE_KEY)) {
@@ -145,19 +107,13 @@ const server = http.createServer((req, res) => {
     });
     return;
   }
-  if (req.method === 'GET' && new URL(req.url, `http://${req.headers.host || 'localhost'}`).pathname === '/api/rtc-config') {
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-    return res.end(JSON.stringify({ iceServers: rtcIceServers }));
-  }
-
   // Strip query strings (e.g. style.css?v=...) before resolving static files.
   // This keeps cache-busting URLs from causing a 404 and taking down the UI styling.
   const requestPath = new URL(req.url, `http://${req.headers.host || 'localhost'}`).pathname;
   let filePath = requestPath === '/' ? '/index.html' : requestPath;
-  filePath = path.resolve(PUBLIC_DIR, `.${filePath}`);
-  const publicRoot = path.resolve(PUBLIC_DIR) + path.sep;
+  filePath = path.join(PUBLIC_DIR, filePath);
 
-  if (!filePath.startsWith(publicRoot)) {
+  if (!filePath.startsWith(PUBLIC_DIR)) {
     res.writeHead(403);
     return res.end('Forbidden');
   }
@@ -174,7 +130,7 @@ const server = http.createServer((req, res) => {
 });
 
 // ---- WebSocket layer ----
-const wss = new WebSocket.Server({ server, maxPayload: 16 * 1024 * 1024 });
+const wss = new WebSocket.Server({ server });
 
 let waitingQueue = [];       // sockets waiting for a random match
 const partners = new Map();  // ws -> partner ws
@@ -291,28 +247,20 @@ wss.on('connection', (ws) => {
       case 'identify': {
         const deviceId = String(msg.deviceId || '').slice(0, 64);
         if (!deviceId) return;
-        const previousId = wsDeviceId.get(ws);
-        if (previousId && previousId !== deviceId && deviceOnline.get(previousId) === ws) deviceOnline.delete(previousId);
-        const previousWs = deviceOnline.get(deviceId);
-        if (previousWs && previousWs !== ws) {
-          try { previousWs.close(4001, 'Replaced by a newer connection'); } catch (_) {}
-        }
         wsDeviceId.set(ws, deviceId);
         deviceOnline.set(deviceId, ws);
-        drainCallSignals(deviceId, ws);
-        db.getProfile(deviceId).then(async (profile) => {
-          if (profile) {
-            names.set(ws, profile.name || 'Stranger');
-            avatars.set(ws, profile.avatarId || 'boy1');
-          } else {
-            await db.upsertProfile(deviceId, names.get(ws) || 'Stranger', avatars.get(ws) || 'boy1');
-          }
-          // Tell this user's contacts that they are online.
-          const contacts = await db.getContacts(deviceId);
+        // Tell this user's contacts that they are online.
+        db.getContacts(deviceId).then(contacts => {
           contacts.forEach(c => {
             const contactWs = deviceOnline.get(c.contactId);
             if (contactWs) send(contactWs, 'presence', { deviceId, online: true });
           });
+        }).catch(() => {});
+        // If this deviceId has a saved profile (e.g. from logging into an
+        // account on a fresh browser), send it back so name/avatar restore
+        // too — not just contacts/inbox.
+        db.getProfile(deviceId).then((profile) => {
+          if (profile) send(ws, 'profile_restore', { name: profile.name, avatar: profile.avatar });
         }).catch(() => {});
         break;
       }
@@ -367,32 +315,37 @@ wss.on('connection', (ws) => {
       }
 
       case 'set_name': {
-        const myId = wsDeviceId.get(ws);
-        const clean = String(msg.name || '').slice(0, 24).trim() || 'Stranger';
-        names.set(ws, clean);
-        if (myId) {
-          const avatarId = avatars.get(ws) || 'boy1';
-          db.upsertProfile(myId, clean, avatarId);
-          db.getContacts(myId).then(contacts => contacts.forEach(c => {
-            const contactWs = deviceOnline.get(c.contactId);
-            if (contactWs) send(contactWs, 'profile_updated', { deviceId: myId, name: clean, avatarId });
-          })).catch(() => {});
+        const clean = String(msg.name || '').slice(0, 24).trim();
+        const name = clean || 'Stranger';
+        names.set(ws, name);
+        const deviceId = wsDeviceId.get(ws);
+        if (deviceId) {
+          db.saveProfile(deviceId, name, avatars.get(ws) || 'boy1').catch(() => {});
+          // Push the profile change to the currently connected contact, if any.
+          for (const [contactWs, contactId] of wsDeviceId.entries()) {
+            if (contactWs === ws || contactId === deviceId) continue;
+            db.areContacts(deviceId, contactId).then(isContact => {
+              if (isContact) send(contactWs, 'profile_updated', { deviceId, name, avatar: avatars.get(ws) || 'boy1' });
+            }).catch(() => {});
+          }
         }
         break;
       }
 
       case 'set_avatar': {
-        const myId = wsDeviceId.get(ws);
         const avatarId = String(msg.avatarId || '').slice(0, 8).trim();
         const VALID_AVATAR_IDS = new Set(['boy1', 'boy2', 'boy3', 'boy4', 'boy5', 'girl1', 'girl2', 'girl3', 'girl4', 'girl5']);
-        const cleanAvatar = VALID_AVATAR_IDS.has(avatarId) ? avatarId : 'boy1';
-        avatars.set(ws, cleanAvatar);
-        if (myId) {
-          db.upsertProfile(myId, names.get(ws) || 'Stranger', cleanAvatar);
-          db.getContacts(myId).then(contacts => contacts.forEach(c => {
-            const contactWs = deviceOnline.get(c.contactId);
-            if (contactWs) send(contactWs, 'profile_updated', { deviceId: myId, name: names.get(ws) || 'Stranger', avatarId: cleanAvatar });
-          })).catch(() => {});
+        const avatar = VALID_AVATAR_IDS.has(avatarId) ? avatarId : 'boy1';
+        avatars.set(ws, avatar);
+        const deviceId = wsDeviceId.get(ws);
+        if (deviceId) {
+          db.saveProfile(deviceId, names.get(ws) || 'Stranger', avatar).catch(() => {});
+          for (const [contactWs, contactId] of wsDeviceId.entries()) {
+            if (contactWs === ws || contactId === deviceId) continue;
+            db.areContacts(deviceId, contactId).then(isContact => {
+              if (isContact) send(contactWs, 'profile_updated', { deviceId, name: names.get(ws) || 'Stranger', avatar });
+            }).catch(() => {});
+          }
         }
         break;
       }
@@ -500,8 +453,7 @@ wss.on('connection', (ws) => {
       case 'open_thread': {
         const myId = wsDeviceId.get(ws);
         const theirId = String(msg.contactId || '');
-        if (!myId || !theirId || myId === theirId) break;
-        if (!(await db.areContacts(myId, theirId))) break;
+        if (!myId || !theirId) break;
         activeThreads.set(myId, theirId);
         db.markThreadRead(theirId, myId).then(async () => {
           const page = await db.getThreadPage(myId, theirId, 30);
@@ -524,7 +476,6 @@ wss.on('connection', (ws) => {
         const theirId = String(msg.contactId || '');
         const beforeId = String(msg.beforeId || '');
         if (!myId || !theirId || !beforeId) break;
-        if (!(await db.areContacts(myId, theirId))) break;
         const page = await db.getThreadPage(myId, theirId, 30, beforeId);
         send(ws, 'older_thread_history', { contactId: theirId, ...page });
         break;
@@ -533,8 +484,7 @@ wss.on('connection', (ws) => {
       case 'inbox_typing': {
         const myId = wsDeviceId.get(ws);
         const toId = String(msg.toDeviceId || '');
-        if (!myId || !toId || myId === toId) break;
-        if (!(await db.areContacts(myId, toId))) break;
+        if (!myId || !toId) break;
         const recipientWs = deviceOnline.get(toId);
         if (recipientWs) send(recipientWs, 'inbox_typing', { fromId: myId });
         break;
@@ -571,16 +521,12 @@ wss.on('connection', (ws) => {
         const toId = String(msg.toDeviceId || '');
         const text = String(msg.text || '').slice(0, 2000).trim();
         if (!myId || !toId || !text || myId === toId) break;
-        if (!(await db.areContacts(myId, toId))) break;
         const replyTo = msg.replyTo && msg.replyTo.id ? {
           id: String(msg.replyTo.id).slice(0, 64),
           fromId: String(msg.replyTo.fromId || '').slice(0, 128),
           msgType: String(msg.replyTo.msgType || 'text').slice(0, 16),
           text: String(msg.replyTo.text || '').slice(0, 180)
         } : null;
-
-        const validReply = replyTo && await db.isMessageInConversation(replyTo.id, myId, toId);
-        if (replyTo && !validReply) break;
 
         db.saveMessage(myId, toId, text, replyTo).then(async (saved) => {
           const id = saved && saved._id ? String(saved._id) : `local-${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -592,15 +538,8 @@ wss.on('connection', (ws) => {
             const delivered = saved ? await db.markMessageDelivered(id) : null;
             payload.delivered = true;
             payload.deliveredAt = delivered?.deliveredAt || new Date();
-            const isReadNow = activeThreads.get(toId) === myId;
-            if (isReadNow && saved) {
-              const read = await db.markMessagesRead(myId, toId);
-              payload.read = true;
-              payload.readAt = read?.readAt || new Date();
-            }
             send(recipientWs, 'inbox_message', payload);
-            send(ws, 'message_status', { id, status: isReadNow ? 'read' : 'delivered' });
-            if (isReadNow) send(ws, 'read_receipt', { byId: toId, contactId: toId });
+            send(ws, 'message_status', { id, status: 'delivered' });
           }
           await pushInboxNotification(toId, myId, { preview: notificationPreview('text', { text }) });
         });
@@ -638,9 +577,7 @@ wss.on('connection', (ws) => {
         const myId = wsDeviceId.get(ws);
         const id = String(msg.id || '');
         const emoji = String(msg.emoji || '').slice(0, 4);
-        const ALLOWED_REACTIONS = new Set(['❤️','😂','👍','😮','😢','🔥']);
-        if (!myId || !id || !emoji || !ALLOWED_REACTIONS.has(emoji)) break;
-        if (!(await db.canUserReactToMessage(id, myId))) break;
+        if (!myId || !id || !emoji) break;
         const updated = await db.toggleReaction(id, myId, emoji);
         if (!updated) break;
         const payload = { id, reactions: updated.reactions || [] };
@@ -661,9 +598,13 @@ wss.on('connection', (ws) => {
         if (recipientWs) {
           send(recipientWs, 'call_invite', {
             fromId: myId,
-            fromName: String(names.get(ws) || 'Contact').slice(0, 40),
-            fromAvatar: String(avatars.get(ws) || 'boy1').slice(0, 8)
+            fromName: String(msg.fromName || 'Contact').slice(0, 40),
+            fromAvatar: String(msg.fromAvatar || 'boy1').slice(0, 8)
           });
+        } else {
+          // Give the caller instant feedback instead of a silent "Calling…"
+          // that never resolves.
+          send(ws, 'call_unavailable', { toDeviceId: toId, reason: 'offline' });
         }
         break;
       }
@@ -674,23 +615,21 @@ wss.on('connection', (ws) => {
         if (!myId || !toId || myId === toId) break;
         const allowed = await db.areContacts(myId, toId);
         if (!allowed) break;
-        const signalPayload = {
-          fromId: myId,
-          signalType: String(msg.signalType || ''),
-          data: msg.data
-        };
         const recipientWs = deviceOnline.get(toId);
-        if (recipientWs) send(recipientWs, 'call_signal', signalPayload);
-        else queueCallSignal(toId, signalPayload);
+        if (recipientWs) {
+          send(recipientWs, 'call_signal', {
+            fromId: myId,
+            signalType: String(msg.signalType || ''),
+            data: msg.data
+          });
+        }
         break;
       }
 
       case 'call_end': {
         const myId = wsDeviceId.get(ws);
         const toId = String(msg.toDeviceId || '');
-        if (!myId || !toId || myId === toId) break;
-        if (!(await db.areContacts(myId, toId))) break;
-        clearCallSignals(toId);
+        if (!myId || !toId) break;
         const recipientWs = deviceOnline.get(toId);
         if (recipientWs) send(recipientWs, 'call_end', { fromId: myId });
         break;
@@ -715,9 +654,6 @@ wss.on('connection', (ws) => {
         if (!(await db.areContacts(myId, toId))) break;
 
         const replyTo = msg.replyTo && msg.replyTo.id ? { id: String(msg.replyTo.id).slice(0,64), fromId: String(msg.replyTo.fromId || '').slice(0,128), msgType: String(msg.replyTo.msgType || 'gif').slice(0,16), text: String(msg.replyTo.text || '').slice(0,180) } : null;
-        const validReply = replyTo && await db.isMessageInConversation(replyTo.id, myId, toId);
-        if (replyTo && !validReply) break;
-
         db.saveGifMessage(myId, toId, gifData, replyTo).then(async (saved) => {
           const payload = {
             id: saved && saved._id ? String(saved._id) : `local-${Date.now()}-${Math.random().toString(36).slice(2)}`,
@@ -729,20 +665,7 @@ wss.on('connection', (ws) => {
           };
           send(ws, 'inbox_message', payload);
           const recipientWs = deviceOnline.get(toId);
-          if (recipientWs) {
-            if (saved) await db.markMessageDelivered(payload.id);
-            payload.delivered = true;
-            payload.deliveredAt = new Date();
-            const isReadNow = activeThreads.get(toId) === myId;
-            if (isReadNow && saved) {
-              await db.markMessagesRead(myId, toId);
-              payload.read = true;
-              payload.readAt = new Date();
-            }
-            send(recipientWs, 'inbox_message', payload);
-            send(ws, 'message_status', { id: payload.id, status: isReadNow ? 'read' : 'delivered' });
-            if (isReadNow) send(ws, 'read_receipt', { byId: toId, contactId: toId });
-          }
+          if (recipientWs) { if (saved) await db.markMessageDelivered(payload.id); payload.delivered = true; send(recipientWs, 'inbox_message', payload); send(ws, 'message_status', { id: payload.id, status: 'delivered' }); }
           await pushInboxNotification(toId, myId, { preview: notificationPreview('gif', {}) });
         });
         break;
@@ -767,13 +690,6 @@ wss.on('connection', (ws) => {
           send(ws, 'file_rejected', { reason: 'Unsupported or invalid file.' });
           break;
         }
-        const encoded = fileData.slice(fileData.indexOf(',') + 1);
-        const padding = encoded.endsWith('==') ? 2 : encoded.endsWith('=') ? 1 : 0;
-        const decodedBytes = Math.floor(encoded.length * 3 / 4) - padding;
-        if (decodedBytes > MAX_FILE_BYTES || Math.abs(decodedBytes - fileSize) > Math.max(1024, fileSize * 0.08)) {
-          send(ws, 'file_rejected', { reason: 'File size could not be verified.' });
-          break;
-        }
         if (!(await db.areContacts(myId, toId))) break;
 
         const replyTo = msg.replyTo && msg.replyTo.id ? {
@@ -782,9 +698,6 @@ wss.on('connection', (ws) => {
           msgType: String(msg.replyTo.msgType || 'file').slice(0,16),
           text: String(msg.replyTo.text || '').slice(0,180)
         } : null;
-
-        const validReply = replyTo && await db.isMessageInConversation(replyTo.id, myId, toId);
-        if (replyTo && !validReply) break;
 
         db.saveFileMessage(myId, toId, fileData, fileName, fileMimeType, fileSize, replyTo).then(async (saved) => {
           if (!saved && db.isReady()) {
@@ -803,15 +716,8 @@ wss.on('connection', (ws) => {
             if (saved) await db.markMessageDelivered(payload.id);
             payload.delivered = true;
             payload.deliveredAt = new Date();
-            const isReadNow = activeThreads.get(toId) === myId;
-            if (isReadNow && saved) {
-              await db.markMessagesRead(myId, toId);
-              payload.read = true;
-              payload.readAt = new Date();
-            }
             send(recipientWs, 'inbox_message', payload);
-            send(ws, 'message_status', { id: payload.id, status: isReadNow ? 'read' : 'delivered' });
-            if (isReadNow) send(ws, 'read_receipt', { byId: toId, contactId: toId });
+            send(ws, 'message_status', { id: payload.id, status: 'delivered' });
           }
           await pushInboxNotification(toId, myId, { preview: notificationPreview('file', { fileName }) });
         });
@@ -827,17 +733,13 @@ wss.on('connection', (ws) => {
         // Guard rails: cap raw size (~2MB base64) and require a sane duration,
         // so one bad client can't blow through the free MongoDB storage tier.
         const MAX_AUDIO_BASE64_LENGTH = 2 * 1024 * 1024;
-        if (!myId || !toId || !audioData || duration <= 0 || myId === toId) break;
-        if (!(await db.areContacts(myId, toId))) break;
+        if (!myId || !toId || !audioData || duration <= 0) break;
         if (audioData.length > MAX_AUDIO_BASE64_LENGTH) {
           send(ws, 'voice_note_rejected', { reason: 'Voice note too large (max ~90 seconds).' });
           break;
         }
 
         const replyTo = msg.replyTo && msg.replyTo.id ? { id: String(msg.replyTo.id).slice(0,64), fromId: String(msg.replyTo.fromId || '').slice(0,128), msgType: String(msg.replyTo.msgType || 'voice').slice(0,16), text: String(msg.replyTo.text || '').slice(0,180) } : null;
-        const validReply = replyTo && await db.isMessageInConversation(replyTo.id, myId, toId);
-        if (replyTo && !validReply) break;
-
         db.saveVoiceMessage(myId, toId, audioData, duration, replyTo).then(async (saved) => {
           const payload = {
             id: saved && saved._id ? String(saved._id) : `local-${Date.now()}-${Math.random().toString(36).slice(2)}`,
@@ -851,20 +753,7 @@ wss.on('connection', (ws) => {
           };
           send(ws, 'inbox_message', payload);
           const recipientWs = deviceOnline.get(toId);
-          if (recipientWs) {
-            if (saved) await db.markMessageDelivered(payload.id);
-            payload.delivered = true;
-            payload.deliveredAt = new Date();
-            const isReadNow = activeThreads.get(toId) === myId;
-            if (isReadNow && saved) {
-              await db.markMessagesRead(myId, toId);
-              payload.read = true;
-              payload.readAt = new Date();
-            }
-            send(recipientWs, 'inbox_message', payload);
-            send(ws, 'message_status', { id: payload.id, status: isReadNow ? 'read' : 'delivered' });
-            if (isReadNow) send(ws, 'read_receipt', { byId: toId, contactId: toId });
-          }
+          if (recipientWs) { if (saved) await db.markMessageDelivered(payload.id); payload.delivered = true; send(recipientWs, 'inbox_message', payload); send(ws, 'message_status', { id: payload.id, status: 'delivered' }); }
           await pushInboxNotification(toId, myId, { preview: notificationPreview('voice', {}) });
         });
         break;

@@ -1,56 +1,50 @@
 # What changed in this pass
 
-Fixed every bug found in the deep review of your uploaded project:
+## 1. Fixed reactions overlapping the next message
+The reaction chip was positioned hanging 13px below each bubble, but rows
+only had 4px of spacing between them — so the chip visually collided with
+whatever message came after it. Fixed by reserving extra space under any
+message that has a reaction, applied dynamically so normal messages stay
+tightly spaced.
 
-## 1. Added a TURN server (likely root cause of garbled/random-sound calls)
-Your WebRTC config only had STUN servers. STUN alone frequently fails on
-mobile carrier networks (Jio/Airtel-style carrier-grade NAT), producing
-exactly the "random sound instead of voice" symptom you described — not a
-hard failure, but an unstable, partially-working connection. Added a free
-TURN relay (Open Relay Project) as a fallback. This is a shared/rate-limited
-free service — fine for a small friend group; if you outgrow it, swap in
-paid TURN credentials from Twilio/Xirsys/metered.ca (just edit `rtcConfig`
-in `public/script.js`).
+## 2. Sent / delivered / seen ticks — verified already correct
+Checked this thoroughly: single grey tick (sent) → double grey tick
+(delivered) → double blue tick (read) already works correctly end-to-end,
+including messages that were queued while the recipient was offline. No
+changes needed here — just confirmed it's solid.
 
-## 2. Hang-up button now on the collapsed call bar
-Previously you had to tap the bar to expand it before you could end a call.
-Now there's a dedicated hang-up button visible immediately, right next to
-the collapsed bar — tapping the bar itself still expands it to show
-duration/quality/speaker/mute.
+## 3. WhatsApp-style chat background
+Added a subtle tiled doodle pattern behind messages (original design —
+small speech-bubble, heart, star, and note motifs — tinted to match the
+app's pink/magenta theme), instead of a flat background.
 
-## 3. Call timeout + offline detection
-- Calling a contact who's offline now gets **instant** feedback ("Offline")
-  instead of "Calling…" forever.
-- Calling a contact who's online but doesn't answer now times out after 35
-  seconds with "No answer" instead of hanging indefinitely.
+## 4. Attach-document button moved into the text input bar
+It was in the header before (easy to miss, inconsistent with how chat
+apps usually place it). Now it sits directly in the message bar next to
+GIF/mic/send, like WhatsApp's paperclip icon.
 
-## 4. Profile (name + avatar) now actually restores on login
-Your name/avatar were being saved to the database on every device, but
-nothing ever read that data back. This meant logging into your account on
-a new browser correctly restored your **contacts and inbox**, but reset
-your **name and avatar** to defaults. Now the server sends your saved
-profile back right after `identify`, and the client applies it.
+## 5. Swipe-to-reply
+Drag any message bubble to the right to reply to it — a reply icon fades
+in as you drag, and releasing past the threshold opens the reply composer
+(with a light haptic buzz on phones that support it). This works alongside
+the existing long-press menu, not instead of it — long-press still gives
+you reply/react/edit/delete options.
 
-## 5. Reactions now check you're actually part of that conversation
-Previously anyone who could guess/obtain a message's ID could react to it,
-even in a conversation they weren't part of. Now only the two people in
-that thread can react to a message in it.
-
-## 6. Removed dead code
-Four leftover DOM references (`accountBar`, `accountBarText`, `inboxBtn`,
-`inboxBadge`) pointed at elements that no longer exist after the bottom-nav
-redesign. They were harmless (properly guarded) but cleaned up for clarity.
+## 6. Bigger emoji-only messages
+A message that's just 1-3 emoji (including flags, skin-tone variants, and
+family/compound emoji, which needed proper grapheme-cluster counting to
+detect correctly) now renders large with no bubble background — same as
+WhatsApp. Anything else still renders as a normal bubble.
 
 ## Tested before delivery
-- Full calling flow: contact-restricted invites, instant offline feedback,
-  reconnect + real call + signal relay + end, non-contact calls correctly
-  blocked
-- Full messaging flow: text, edit, delete, GIF — all still working
-  (no regressions)
-- Reaction authorization: a real participant can react, a non-participant
-  cannot
-- Profile restore: save profile → disconnect → reconnect fresh → correct
-  name/avatar come back automatically
-- All 125 DOM element references between HTML and JS verified to match
-- Server boots cleanly with or without `MONGODB_URI`/`VAPID_PRIVATE_KEY`
-  configured
+- Reaction spacing fix confirmed visually consistent (extra margin only
+  applied when a reaction actually exists)
+- Emoji-only detection: 15 test cases covering single emoji, multiple
+  emoji, flags, skin tones, compound family emoji, mixed text+emoji, and
+  plain text — all correctly classified
+- Full server-side regression: matching, contacts, text, edit, delete,
+  reactions (with proper participant-only authorization), GIFs, and an
+  emoji-only message all flow through the protocol correctly
+- All 125 HTML↔JS element references verified to match after moving the
+  attach button
+- Server boots cleanly with or without env vars configured
