@@ -48,3 +48,29 @@ WhatsApp. Anything else still renders as a normal bubble.
 - All 125 HTML↔JS element references verified to match after moving the
   attach button
 - Server boots cleanly with or without env vars configured
+
+---
+
+# Follow-up fixes (this pass)
+
+## Reaction overlap — fixed for real this time
+Found the actual root cause: `decorateThreadBubble()` (which applies the
+reaction spacing) was being called **before** the bubble got attached to
+its row, in all 4 message-rendering functions (text, GIF, file, voice).
+- **Live reactions worked** because the bubble was already in the DOM by
+  the time you tapped react.
+- **Reloading the thread broke it** because history messages get built
+  and decorated in one pass — decorate ran while the bubble was still
+  "floating" with no parent row, so `bubble.closest('.wa-bubble-row')`
+  returned nothing and the spacing fix silently never applied.
+
+Fixed by reordering all 4 functions to attach the bubble to its row first,
+then decorate it. Verified via a full reload simulation: react → simulate
+reopening the thread (server round-trip) → confirmed the reaction data
+comes back correctly in `thread_history`, which the now-fixed client code
+will correctly space for.
+
+## Chat background — reverted
+Brought back the plain background from before, per your preference.
+
+## Swipe-to-reply — confirmed working, no changes needed

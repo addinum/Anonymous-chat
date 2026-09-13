@@ -1250,10 +1250,10 @@
     if (msgId) bubble.dataset.msgId = msgId;
 
     bubble.innerHTML = `<div class="wa-bubble__reply-placeholder"></div><span class="wa-bubble__text">${linked}</span><span class="wa-bubble__time">${formatBubbleTime(timestamp || Date.now())}</span>`;
-    decorateThreadBubble(bubble, meta, who);
 
     row.appendChild(bubble);
     threadRenderTarget.appendChild(row);
+    decorateThreadBubble(bubble, meta, who);
     if (threadRenderTarget === threadLog) threadLog.scrollTop = threadLog.scrollHeight;
   }
 
@@ -1287,9 +1287,9 @@
     bubble.appendChild(replyPlaceholder);
     bubble.appendChild(img);
     bubble.appendChild(timeMeta);
-    decorateThreadBubble(bubble, meta, who);
     row.appendChild(bubble);
     threadRenderTarget.appendChild(row);
+    decorateThreadBubble(bubble, meta, who);
     if (threadRenderTarget === threadLog) threadLog.scrollTop = threadLog.scrollHeight;
   }
 
@@ -1365,9 +1365,9 @@
     timeMeta.className = 'wa-bubble__time';
     bubble.appendChild(timeMeta);
 
-    decorateThreadBubble(bubble, fileMeta, who);
     row.appendChild(bubble);
     threadRenderTarget.appendChild(row);
+    decorateThreadBubble(bubble, fileMeta, who);
     if (threadRenderTarget === threadLog) threadLog.scrollTop = threadLog.scrollHeight;
   }
 
@@ -1501,8 +1501,6 @@
       </div>
       <span class="wa-bubble__time">${formatBubbleTime(timestamp || Date.now())}</span>
     `;
-    decorateThreadBubble(bubble, meta, who);
-
     const audio = new Audio(audioData);
     const playBtn = bubble.querySelector('.wa-voice-play');
     const waveformBars = bubble.querySelectorAll('.wa-voice-waveform span');
@@ -1540,6 +1538,7 @@
 
     row.appendChild(bubble);
     threadRenderTarget.appendChild(row);
+    decorateThreadBubble(bubble, meta, who);
     if (threadRenderTarget === threadLog) threadLog.scrollTop = threadLog.scrollHeight;
   }
 
